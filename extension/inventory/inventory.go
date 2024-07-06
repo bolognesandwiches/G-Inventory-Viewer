@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -42,10 +43,6 @@ func (m *Manager) SetExt(ext *g.Ext) {
 }
 
 func (m *Manager) HandleStripInfo2(e *g.Intercept) {
-	if !m.isScanning {
-		return
-	}
-
 	var inv inventory.Inventory
 	e.Packet.Read(&inv)
 
@@ -56,32 +53,53 @@ func (m *Manager) HandleStripInfo2(e *g.Intercept) {
 		m.items[item.ItemId] = item
 	}
 
+	log.Printf("Received %d items", len(inv.Items))
+
+	if len(inv.Items) == 0 {
+		m.isScanning = false
+	} else {
+		// Request next page
+		go func() {
+			time.Sleep(100 * time.Millisecond) // Small delay to avoid flooding
+			m.ext.Send(out.GETSTRIP, []byte("next"))
+		}()
+	}
+
 	m.updateGUIFn(m.getEnrichedItems())
 }
 
-func (m *Manager) ScanInventory(ext *g.Ext) {
+func (m *Manager) ScanInventory() {
 	m.mutex.Lock()
 	m.isScanning = true
 	m.mutex.Unlock()
 
-	if ext != nil {
-		m.ext = ext
-	}
-
 	if m.ext == nil {
-		m.updateGUIFn([]EnrichedItem{{Item: inventory.Item{Class: "Error"}, FurniData: furnidata.FurniItem{Name: "Error: GoEarth extension not initialized"}}})
+		log.Println("Error: GoEarth extension not initialized")
 		return
 	}
 
+	log.Println("Sending GETSTRIP update...")
 	m.ext.Send(out.GETSTRIP, []byte("update"))
 
-	go func() {
-		time.Sleep(10 * time.Second)
-		m.mutex.Lock()
-		m.isScanning = false
-		m.mutex.Unlock()
-		m.updateGUIFn(m.getEnrichedItems())
-	}()
+	timeout := time.After(30 * time.Second)
+	tick := time.Tick(500 * time.Millisecond)
+
+	for {
+		select {
+		case <-timeout:
+			log.Println("Inventory scan timed out")
+			m.mutex.Lock()
+			m.isScanning = false
+			m.mutex.Unlock()
+			return
+		case <-tick:
+			if !m.isScanning {
+				log.Println("Inventory scan completed")
+				m.updateGUIFn(m.getEnrichedItems())
+				return
+			}
+		}
+	}
 }
 
 func (m *Manager) getEnrichedItems() []EnrichedItem {

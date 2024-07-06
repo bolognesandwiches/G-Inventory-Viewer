@@ -29,16 +29,21 @@ func main() {
 	inventoryManager := inventory.NewManager()
 	uiManager := ui.NewManager(inventoryManager)
 
-	go func() {
-		ext.Intercept(in.STRIPINFO_2).With(func(e *g.Intercept) {
-			inventoryManager.HandleStripInfo2(e)
-		})
-		ext.Connected(func(args g.ConnectArgs) {
-			log.Println("Connected to server. Starting inventory scan...")
-			go inventoryManager.ScanInventory(ext)
-		})
-		ext.Run()
-	}()
+	ext.Intercept(in.STRIPINFO_2).With(func(e *g.Intercept) {
+		inventoryManager.HandleStripInfo2(e)
+	})
+
+	ext.Connected(func(args g.ConnectArgs) {
+		log.Println("Connected to server. Starting inventory scan...")
+		inventoryManager.SetExt(ext)
+		go inventoryManager.ScanInventory()
+	})
+
+	ext.Disconnected(func() {
+		log.Println("Disconnected from server.")
+	})
+
+	go ext.Run()
 
 	uiManager.Run()
 }

@@ -33,7 +33,7 @@ func (m *Manager) Run() {
 
 	m.scrollContainer = container.NewScroll(content)
 	refreshButton := widget.NewButton("Refresh Inventory", func() {
-		go m.inventoryManager.ScanInventory(nil)
+		go m.inventoryManager.ScanInventory()
 	})
 
 	layout := container.NewBorder(refreshButton, nil, nil, nil, m.scrollContainer)

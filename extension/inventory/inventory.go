@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bolognesandwiches/G-Inventory-Viewer/extension/furnidata"
 	g "xabbo.b7c.io/goearth"
 	"xabbo.b7c.io/goearth/shockwave/inventory"
 	"xabbo.b7c.io/goearth/shockwave/out"
@@ -16,8 +17,14 @@ type Manager struct {
 	items       map[int]inventory.Item
 	mutex       sync.Mutex
 	isScanning  bool
-	updateGUIFn func(string)
+	updateGUIFn func([]EnrichedItem)
 	ext         *g.Ext
+}
+
+type EnrichedItem struct {
+	inventory.Item
+	FurniData furnidata.FurniItem
+	IconPath  string
 }
 
 func NewManager() *Manager {
@@ -26,7 +33,7 @@ func NewManager() *Manager {
 	}
 }
 
-func (m *Manager) SetUpdateCallback(fn func(string)) {
+func (m *Manager) SetUpdateCallback(fn func([]EnrichedItem)) {
 	m.updateGUIFn = fn
 }
 
@@ -49,7 +56,7 @@ func (m *Manager) HandleStripInfo2(e *g.Intercept) {
 		m.items[item.ItemId] = item
 	}
 
-	m.updateGUIFn(fmt.Sprintf("Received %d items", len(inv.Items)))
+	m.updateGUIFn(m.getEnrichedItems())
 }
 
 func (m *Manager) ScanInventory(ext *g.Ext) {
@@ -62,7 +69,7 @@ func (m *Manager) ScanInventory(ext *g.Ext) {
 	}
 
 	if m.ext == nil {
-		m.updateGUIFn("Error: GoEarth extension not initialized")
+		m.updateGUIFn([]EnrichedItem{{Item: inventory.Item{Class: "Error"}, FurniData: furnidata.FurniItem{Name: "Error: GoEarth extension not initialized"}}})
 		return
 	}
 
@@ -73,46 +80,43 @@ func (m *Manager) ScanInventory(ext *g.Ext) {
 		m.mutex.Lock()
 		m.isScanning = false
 		m.mutex.Unlock()
-		m.displayInventory()
+		m.updateGUIFn(m.getEnrichedItems())
 	}()
 }
 
-func (m *Manager) displayInventory() {
+func (m *Manager) getEnrichedItems() []EnrichedItem {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	var output strings.Builder
-	output.WriteString("Current Inventory:\n------------------\n")
-
-	itemCounts := make(map[string]int)
+	var enrichedItems []EnrichedItem
 	for _, item := range m.items {
-		key := m.getItemKey(item)
-		itemCounts[key]++
+		enrichedItem := EnrichedItem{
+			Item: item,
+		}
+		if furniData, ok := furnidata.FurniData[item.Class]; ok {
+			enrichedItem.FurniData = furniData
+			enrichedItem.IconPath = furnidata.GetIconPath(item.Class)
+		} else {
+			enrichedItem.FurniData = furnidata.FurniItem{Name: item.Class, Description: "No description available"}
+			enrichedItem.IconPath = furnidata.GetIconPath("unknown")
+		}
+		enrichedItems = append(enrichedItems, enrichedItem)
 	}
 
-	var keys []string
-	for key := range itemCounts {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	sort.Slice(enrichedItems, func(i, j int) bool {
+		return enrichedItems[i].FurniData.Name < enrichedItems[j].FurniData.Name
+	})
 
-	for _, key := range keys {
-		output.WriteString(fmt.Sprintf("%s: %d\n", key, itemCounts[key]))
-	}
-
-	output.WriteString("------------------\n")
-	output.WriteString(fmt.Sprintf("Total unique items: %d\n", len(itemCounts)))
-	output.WriteString(fmt.Sprintf("Total items: %d\n", len(m.items)))
-
-	m.updateGUIFn(output.String())
+	return enrichedItems
 }
 
-func (m *Manager) getItemKey(item inventory.Item) string {
-	key := fmt.Sprintf("%s (%s)", item.Class, item.Type)
-	if item.Type == "I" {
-		key += fmt.Sprintf(" Props:%s", item.Props)
-	} else if item.Type == "S" {
-		key += fmt.Sprintf(" Size:%dx%d Colors:%s", item.DimX, item.DimY, item.Colors)
+func (m *Manager) GetInventorySummary() string {
+	items := m.getEnrichedItems()
+	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("Total items: %d\n", len(items)))
+	summary.WriteString("------------------\n")
+	for _, item := range items {
+		summary.WriteString(fmt.Sprintf("%s (%s): %s\n", item.FurniData.Name, item.Class, item.FurniData.Description))
 	}
-	return key
+	return summary.String()
 }

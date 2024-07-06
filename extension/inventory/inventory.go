@@ -17,9 +17,10 @@ import (
 type Manager struct {
 	items       map[int]inventory.Item
 	mutex       sync.Mutex
-	isScanning  bool
 	updateGUIFn func([]EnrichedItem)
 	ext         *g.Ext
+	isScanning  bool
+	firstItemId int
 }
 
 type EnrichedItem struct {
@@ -49,15 +50,27 @@ func (m *Manager) HandleStripInfo2(e *g.Intercept) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	if len(inv.Items) == 0 {
+		m.isScanning = false
+		log.Println("Received empty page, stopping scan")
+		return
+	}
+
+	if m.firstItemId == 0 {
+		m.firstItemId = inv.Items[0].ItemId
+	} else if inv.Items[0].ItemId == m.firstItemId {
+		m.isScanning = false
+		log.Println("Looped back to first item, stopping scan")
+		return
+	}
+
 	for _, item := range inv.Items {
 		m.items[item.ItemId] = item
 	}
 
 	log.Printf("Received %d items", len(inv.Items))
 
-	if len(inv.Items) == 0 {
-		m.isScanning = false
-	} else {
+	if m.isScanning {
 		// Request next page
 		go func() {
 			time.Sleep(100 * time.Millisecond) // Small delay to avoid flooding
@@ -68,44 +81,17 @@ func (m *Manager) HandleStripInfo2(e *g.Intercept) {
 	m.updateGUIFn(m.getEnrichedItems())
 }
 
-func (m *Manager) ScanInventory() {
+func (m *Manager) StartScanning() {
 	m.mutex.Lock()
 	m.isScanning = true
+	m.firstItemId = 0
+	m.items = make(map[int]inventory.Item) // Clear existing items
 	m.mutex.Unlock()
 
-	if m.ext == nil {
-		log.Println("Error: GoEarth extension not initialized")
-		return
-	}
-
-	log.Println("Sending GETSTRIP update...")
 	m.ext.Send(out.GETSTRIP, []byte("update"))
-
-	timeout := time.After(30 * time.Second)
-	tick := time.Tick(500 * time.Millisecond)
-
-	for {
-		select {
-		case <-timeout:
-			log.Println("Inventory scan timed out")
-			m.mutex.Lock()
-			m.isScanning = false
-			m.mutex.Unlock()
-			return
-		case <-tick:
-			if !m.isScanning {
-				log.Println("Inventory scan completed")
-				m.updateGUIFn(m.getEnrichedItems())
-				return
-			}
-		}
-	}
 }
 
 func (m *Manager) getEnrichedItems() []EnrichedItem {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
 	var enrichedItems []EnrichedItem
 	for _, item := range m.items {
 		enrichedItem := EnrichedItem{
@@ -134,11 +120,20 @@ func (m *Manager) getEnrichedItems() []EnrichedItem {
 
 func (m *Manager) GetInventorySummary() string {
 	items := m.getEnrichedItems()
+	itemCounts := make(map[string]int)
+
+	for _, item := range items {
+		itemCounts[item.Class]++
+	}
+
 	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("Total unique items: %d\n", len(itemCounts)))
 	summary.WriteString(fmt.Sprintf("Total items: %d\n", len(items)))
 	summary.WriteString("------------------\n")
-	for _, item := range items {
-		summary.WriteString(fmt.Sprintf("%s (%s): %s\n", item.FurniData.Name, item.Class, item.FurniData.Description))
+
+	for class, count := range itemCounts {
+		summary.WriteString(fmt.Sprintf("%s: %d\n", class, count))
 	}
+
 	return summary.String()
 }

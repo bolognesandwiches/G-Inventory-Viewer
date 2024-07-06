@@ -14,7 +14,9 @@ import (
 type Manager struct {
 	inventoryManager *inventory.Manager
 	window           fyne.Window
-	scrollContainer  *container.Scroll
+	inventoryText    *widget.Entry
+	summaryText      *widget.Label
+	iconContainer    *fyne.Container
 }
 
 func NewManager(invManager *inventory.Manager) *Manager {
@@ -27,18 +29,24 @@ func (m *Manager) Run() {
 	myApp := app.New()
 	m.window = myApp.NewWindow("Habbo Inventory Viewer")
 
+	m.inventoryText = widget.NewMultiLineEntry()
+	m.inventoryText.SetText("Waiting for inventory scan...")
+	m.inventoryText.Wrapping = fyne.TextWrapWord
+
+	m.summaryText = widget.NewLabel("")
+	m.iconContainer = container.NewGridWrap(fyne.NewSize(40, 40))
+
 	content := container.NewVBox(
-		widget.NewLabel("Inventory:"),
+		widget.NewLabel("Inventory Summary:"),
+		m.summaryText,
+		widget.NewLabel("Icons:"),
+		container.NewScroll(m.iconContainer),
+		widget.NewLabel("Detailed Inventory:"),
+		container.NewScroll(m.inventoryText),
 	)
 
-	m.scrollContainer = container.NewScroll(content)
-	refreshButton := widget.NewButton("Refresh Inventory", func() {
-		go m.inventoryManager.ScanInventory()
-	})
-
-	layout := container.NewBorder(refreshButton, nil, nil, nil, m.scrollContainer)
-	m.window.SetContent(layout)
-	m.window.Resize(fyne.NewSize(600, 400))
+	m.window.SetContent(content)
+	m.window.Resize(fyne.NewSize(800, 600))
 
 	m.inventoryManager.SetUpdateCallback(m.updateInventoryDisplay)
 
@@ -46,25 +54,24 @@ func (m *Manager) Run() {
 }
 
 func (m *Manager) updateInventoryDisplay(items []inventory.EnrichedItem) {
-	content := container.NewVBox()
+	var displayText string
+	iconPaths := make(map[string]struct{})
 
 	for _, item := range items {
-		itemBox := container.NewHBox()
-
-		// Load and display icon
-		icon := canvas.NewImageFromFile(item.IconPath)
-		icon.FillMode = canvas.ImageFillOriginal
-		icon.SetMinSize(fyne.NewSize(32, 32))
-		itemBox.Add(icon)
-
-		// Display item info
-		info := widget.NewLabel(fmt.Sprintf("%s: %s\nDescription: %s",
-			item.FurniData.Name, item.Class, item.FurniData.Description))
-		itemBox.Add(info)
-
-		content.Add(itemBox)
+		displayText += fmt.Sprintf("%s (%s): %s\n",
+			item.FurniData.Name, item.Class, item.FurniData.Description)
+		iconPaths[item.IconPath] = struct{}{}
 	}
 
-	m.scrollContainer.Content = content
-	m.scrollContainer.Refresh()
+	m.inventoryText.SetText(displayText)
+	m.summaryText.SetText(m.inventoryManager.GetInventorySummary())
+
+	m.iconContainer.Objects = nil
+	for iconPath := range iconPaths {
+		icon := canvas.NewImageFromFile(iconPath)
+		icon.FillMode = canvas.ImageFillOriginal
+		icon.SetMinSize(fyne.NewSize(32, 32))
+		m.iconContainer.Add(container.NewPadded(icon))
+	}
+	m.iconContainer.Refresh()
 }

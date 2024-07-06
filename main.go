@@ -14,7 +14,7 @@ import (
 var ext = g.NewExt(g.ExtInfo{
 	Title:       "Inventory Viewer",
 	Description: "View all items in your hand",
-	Version:     "0.4.0",
+	Version:     "0.4.1",
 	Author:      "Modified from 0xb0bba's G-Trader",
 })
 
@@ -29,18 +29,13 @@ func main() {
 	inventoryManager := inventory.NewManager()
 	uiManager := ui.NewManager(inventoryManager)
 
-	ext.Intercept(in.STRIPINFO_2).With(func(e *g.Intercept) {
-		inventoryManager.HandleStripInfo2(e)
-	})
+	inventoryManager.SetExt(ext)
+
+	ext.Intercept(in.STRIPINFO_2).With(inventoryManager.HandleStripInfo2)
 
 	ext.Connected(func(args g.ConnectArgs) {
 		log.Println("Connected to server. Starting inventory scan...")
-		inventoryManager.SetExt(ext)
-		go inventoryManager.ScanInventory()
-	})
-
-	ext.Disconnected(func() {
-		log.Println("Disconnected from server.")
+		inventoryManager.StartScanning()
 	})
 
 	go ext.Run()

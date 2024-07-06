@@ -93,11 +93,15 @@ func (m *Manager) getEnrichedItems() []EnrichedItem {
 		enrichedItem := EnrichedItem{
 			Item: item,
 		}
-		if furniData, ok := furnidata.FurniData[item.Class]; ok {
+		if furniData, ok := furnidata.GetFurniItem(item.Class); ok {
 			enrichedItem.FurniData = furniData
 			enrichedItem.IconPath = furnidata.GetIconPath(item.Class)
 		} else {
-			enrichedItem.FurniData = furnidata.FurniItem{Name: item.Class, Description: "No description available"}
+			enrichedItem.FurniData = furnidata.FurniItem{
+				Name:        item.Class,
+				Description: "No description available",
+				Classname:   item.Class,
+			}
 			enrichedItem.IconPath = furnidata.GetIconPath("unknown")
 		}
 		enrichedItems = append(enrichedItems, enrichedItem)

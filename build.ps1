@@ -1,4 +1,4 @@
-$Name = "g-itemViewer"
+$Name = "G-itemViewer"
 $ProjectPath = $PSScriptRoot  # This will set the path to the directory containing the script
 $ExtPath = (Get-Item $ProjectPath).Parent.FullName  # This will set the path to the parent directory (Ext)
 
@@ -8,10 +8,24 @@ Set-Location $ProjectPath
 # Create bin directory if it doesn't exist
 New-Item -ItemType Directory -Force -Path "bin"
 
+# Create icon.rc file
+@"
+IDI_ICON1 ICON "assets/app_icon.ico"
+"@ | Out-File -FilePath "icon.rc" -Encoding ascii
+
 echo "Building for Windows..."
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
+
+# Generate the syso file from the rc file
+windres -i icon.rc -o icon.syso -O coff
+
+# Build the executable with the icon
 go build -o "bin/${Name}-win.exe" -ldflags="-H=windowsgui" .
+
+# Remove the temporary files
+Remove-Item icon.rc
+Remove-Item icon.syso
 
 echo "Build complete."
 
@@ -21,8 +35,9 @@ echo "Copying assets..."
 # Create assets directory in bin if it doesn't exist
 New-Item -ItemType Directory -Force -Path "bin/assets"
 
-# Copy scan icon
+# Copy scan icon and app icon
 Copy-Item -Path "assets/scan_icon.png" -Destination "bin/assets/scan_icon.png" -Force
+Copy-Item -Path "assets/app_icon.ico" -Destination "bin/assets/app_icon.ico" -Force
 
 # Copy fonts
 Copy-Item -Path "$ExtPath/Volter_Goldfish.ttf" -Destination "bin/Volter_Goldfish.ttf" -Force

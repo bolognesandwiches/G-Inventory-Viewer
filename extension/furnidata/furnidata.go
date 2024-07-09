@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 const (
@@ -17,6 +18,7 @@ const (
 var (
 	furniData     map[string]FurniData
 	externalTexts map[string]string
+	mu            sync.Mutex
 )
 
 type FurniData struct {
@@ -34,6 +36,9 @@ func init() {
 }
 
 func GetIconURL(classname string, itemType string, props string) string {
+	mu.Lock()
+	defer mu.Unlock()
+
 	// Replace * with _ in the classname for icon URL
 	classnameForIcon := strings.ReplaceAll(classname, "*", "_")
 
@@ -58,6 +63,9 @@ func GetIconURL(classname string, itemType string, props string) string {
 }
 
 func GetItemName(class string, itemType string, props string) string {
+	mu.Lock()
+	defer mu.Unlock()
+
 	var key string
 	if itemType == "I" {
 		key = fmt.Sprintf("poster_%s_name", props)
@@ -101,13 +109,15 @@ func LoadFurniData(gameHost string) error {
 		return err
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
+
 	furniData = make(map[string]FurniData)
 	for _, furni := range data.RoomItemTypes.FurniType {
 		furniData[furni.ClassName] = furni
 	}
 
 	log.Printf("Furni data map: %+v", furniData)
-
 	return nil
 }
 
@@ -126,6 +136,8 @@ func LoadExternalTexts(gameHost string) error {
 	}
 
 	lines := strings.Split(string(body), "\n")
+	mu.Lock()
+	defer mu.Unlock()
 	for _, line := range lines {
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {

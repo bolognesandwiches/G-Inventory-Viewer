@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bolognesandwiches/G-Inventory-Viewer/extension/furnidata"
@@ -18,6 +19,7 @@ type Manager struct {
 	ext          *g.Ext
 	isScanning   bool
 	isCounted    map[int]bool
+	mu           sync.Mutex // Mutex to handle concurrent access to isCounted and allItems
 	scanningDone chan bool
 	allItems     []EnrichedItem
 }
@@ -45,9 +47,11 @@ func (m *Manager) SetUpdateCallback(fn func([]EnrichedItem)) {
 func (m *Manager) ScanInventory() {
 	go func() {
 		time.Sleep(5 * time.Second) // Wait a bit after connecting
+		m.mu.Lock()
 		m.isScanning = true
 		m.isCounted = make(map[int]bool)
 		m.allItems = make([]EnrichedItem, 0)
+		m.mu.Unlock()
 
 		m.ext.Send(out.GETSTRIP, []byte("update"))
 		<-m.scanningDone
@@ -62,32 +66,45 @@ func (m *Manager) HandleStripInfo2(e *g.Intercept) {
 		}
 	}()
 
+	m.mu.Lock()
 	if !m.isScanning {
+		m.mu.Unlock()
 		return
 	}
+	m.mu.Unlock()
 
 	var inv inventory.Inventory
-	e.Packet.Read(&inv)
+	e.Packet.Read(&inv) // Read packet without assignment
 
 	if len(inv.Items) == 0 {
+		m.mu.Lock()
 		m.isScanning = false
+		m.mu.Unlock()
 		m.scanningDone <- true
 		return
 	}
 
 	newItemFound := false
 	for _, item := range inv.Items {
+		m.mu.Lock()
 		if !m.isCounted[item.ItemId] {
 			m.isCounted[item.ItemId] = true
+			m.mu.Unlock()
+
 			enrichedItem := m.enrichItem(item)
+			m.mu.Lock()
 			m.allItems = append(m.allItems, enrichedItem)
+			m.mu.Unlock()
 			newItemFound = true
+		} else {
+			m.mu.Unlock()
 		}
 	}
 
 	if !newItemFound {
-		// If no new items were found in this page, we've scanned the entire inventory
+		m.mu.Lock()
 		m.isScanning = false
+		m.mu.Unlock()
 		m.scanningDone <- true
 		return
 	}
@@ -124,8 +141,10 @@ func (m *Manager) displayInventory() {
 }
 
 func (m *Manager) GetInventorySummary() string {
-	itemCounts := make(map[string]int)
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
+	itemCounts := make(map[string]int)
 	for _, item := range m.allItems {
 		name := furnidata.GetItemName(item.Class, string(item.Type), item.Props)
 		itemCounts[name]++

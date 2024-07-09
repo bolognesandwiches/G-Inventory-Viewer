@@ -37,8 +37,4 @@ require (
 	honnef.co/go/js/dom v0.0.0-20210725211120-f030747120f2 // indirect
 )
 
-require (
-	github.com/gonutz/w32 v1.0.0 // indirect
-	github.com/gonutz/w32/v2 v2.11.1 // indirect
-	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
-)
+require golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect

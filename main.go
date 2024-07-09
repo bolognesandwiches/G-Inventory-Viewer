@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"runtime"
+	"time"
 
 	"github.com/bolognesandwiches/G-Inventory-Viewer/extension/furnidata"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/extension/inventory"
@@ -13,8 +14,8 @@ import (
 )
 
 var ext = g.NewExt(g.ExtInfo{
-	Title:       "g-itemViewer",
-	Description: "View all items in your hand",
+	Title:       "G-itemViewer",
+	Description: "View all items in your room and hand",
 	Version:     "0.1.0",
 	Author:      "madlad",
 })
@@ -26,22 +27,44 @@ func main() {
 	roomManager := room.NewManager(ext)
 	uiManager := ui.NewManager(inventoryManager, roomManager)
 
+	// Register packet intercepts
 	ext.Intercept(in.STRIPINFO_2).With(inventoryManager.HandleStripInfo2)
 
+	// Load Furnidata and external texts upon connection
 	ext.Connected(func(args g.ConnectArgs) {
-		err := furnidata.LoadFurniData(args.Host)
-		if err != nil {
+		log.Println("Connected to server:", args.Host)
+		if err := furnidata.LoadFurniData(args.Host); err != nil {
 			log.Printf("Error loading furni data: %v", err)
 		}
-
-		err = furnidata.LoadExternalTexts(args.Host)
-		if err != nil {
+		if err := furnidata.LoadExternalTexts(args.Host); err != nil {
 			log.Printf("Error loading external texts: %v", err)
 		}
-
 	})
 
+	// Handle extension initialization
+	ext.Initialized(func(args g.InitArgs) {
+		log.Printf("Extension initialized (connected=%t)", args.Connected)
+	})
+
+	// Handle extension activation
+	ext.Activated(func() {
+		log.Println("Extension activated")
+		uiManager.ShowWindow() // Show the GUI window on activation
+		go func() {
+			time.Sleep(5 * time.Second)      // Ensure all initial setup is complete
+			inventoryManager.ScanInventory() // Automatically start scanning inventory
+		}()
+	})
+
+	// Handle disconnection
+	ext.Disconnected(func() {
+		log.Println("Disconnected from server")
+		uiManager.HideWindow() // Hide the GUI window on disconnection
+	})
+
+	// Run the extension
 	go ext.Run()
 
+	// Run the UI manager
 	uiManager.Run()
 }

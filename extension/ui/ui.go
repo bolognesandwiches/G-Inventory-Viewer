@@ -7,11 +7,13 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/extension/inventory"
@@ -30,6 +32,8 @@ type Manager struct {
 	roomSummaryText   *widget.Entry
 	roomIconContainer *fyne.Container
 	roomItemsEntry    *widget.Entry
+	app               fyne.App
+	mu                sync.Mutex // Mutex to handle concurrent access
 }
 
 func NewManager(invManager *inventory.Manager, roomManager *room.Manager) *Manager {
@@ -40,10 +44,36 @@ func NewManager(invManager *inventory.Manager, roomManager *room.Manager) *Manag
 }
 
 func (m *Manager) Run() {
-	myApp := app.New()
+	m.mu.Lock()
+	m.app = app.New()
 	customTheme := &habboTheme{}
-	myApp.Settings().SetTheme(customTheme)
-	m.window = myApp.NewWindow("Habbo Inventory and Room Viewer")
+	m.app.Settings().SetTheme(customTheme)
+	icon, _ := fyne.LoadResourceFromPath("./assets/scan_icon.png")
+	m.app.SetIcon(icon)
+	m.window = m.app.NewWindow("G-itemViewer")
+	m.mu.Unlock()
+
+	// Load header icons
+	leftIcon := canvas.NewImageFromFile("./assets/left_icon.png")
+	rightIcon := canvas.NewImageFromFile("./assets/right_icon.png")
+	leftIcon.Resize(fyne.NewSize(100, 27))
+	rightIcon.Resize(fyne.NewSize(100, 27))
+	leftIcon.SetMinSize(fyne.NewSize(100, 27))
+	rightIcon.SetMinSize(fyne.NewSize(100, 27))
+
+	// Create title text
+	titleText := canvas.NewText("G-itemViewer", color.White)
+	titleText.Alignment = fyne.TextAlignCenter
+	titleText.TextStyle = fyne.TextStyle{Bold: true}
+
+	// Create header container
+	header := container.NewHBox(
+		leftIcon,
+		layout.NewSpacer(),
+		titleText,
+		layout.NewSpacer(),
+		rightIcon,
+	)
 
 	inventoryTab := m.setupInventoryTab()
 	roomSummaryTab := m.setupRoomSummaryTab()
@@ -73,16 +103,43 @@ func (m *Manager) Run() {
 
 	tabs.OnChanged = updateContent
 
-	mainContainer := container.NewBorder(tabs, nil, nil, nil, content)
+	mainContainer := container.NewBorder(
+		container.NewVBox(
+			header,
+			tabs,
+		),
+		nil, nil, nil,
+		content,
+	)
 
 	m.window.SetContent(mainContainer)
-	m.window.Resize(fyne.NewSize(300, 400))
+	m.window.Resize(fyne.NewSize(275, 300))
 	m.window.SetPadded(true)
 
 	m.inventoryManager.SetUpdateCallback(m.updateInventoryDisplay)
 	m.roomManager.SetUpdateCallback(m.updateRoomDisplay)
 
+	m.mu.Lock()
+	m.window.Hide() // Initially hide the window
+	m.mu.Unlock()
+
 	m.window.ShowAndRun()
+}
+
+func (m *Manager) ShowWindow() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.window != nil {
+		m.window.Show()
+	}
+}
+
+func (m *Manager) HideWindow() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.window != nil {
+		m.window.Hide()
+	}
 }
 
 func (m *Manager) setupInventoryTab() *fyne.Container {
@@ -161,6 +218,9 @@ func (m *Manager) createTitledContainer(content fyne.CanvasObject, title string)
 }
 
 func (m *Manager) updateInventoryDisplay(items []inventory.EnrichedItem) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	var displayText string
 	iconURLs := make(map[string][]inventory.EnrichedItem)
 	placeholderItems := make(map[string][]inventory.EnrichedItem)
@@ -234,6 +294,9 @@ func (m *Manager) updateInventoryDisplay(items []inventory.EnrichedItem) {
 }
 
 func (m *Manager) updateRoomDisplay(items []room.EnrichedItem) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	var displayText string
 	iconURLs := make(map[string][]room.EnrichedItem)
 	placeholderItems := make(map[string][]room.EnrichedItem)
@@ -518,7 +581,7 @@ func (r *customTabRenderer) Refresh() {
 	}
 	r.text.Color = color.Black
 	r.outline.StrokeColor = color.Black
-	r.outline.StrokeWidth = 1
+	r.outline.StrokeWidth = 3
 	r.outline.FillColor = color.Transparent
 
 	r.background.CornerRadius = 5

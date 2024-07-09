@@ -2,6 +2,8 @@ G-Earth extension for Habbo Origins using the GoEarth framework.
 
 A Habbo-styled GUI that allows for inspection of both Inventory and Room furni and wallitems.
 
+**Usage**
+
 **Inventory**
 
 * Summary of unique and total items and their counts currently held in the inventory is displayed in the 'Iventory Summary' box (once a Scan is initiated, click magnifying glass to begin).

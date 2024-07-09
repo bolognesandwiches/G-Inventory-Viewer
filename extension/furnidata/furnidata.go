@@ -3,74 +3,138 @@ package furnidata
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"strings"
 )
 
-type FurniItem struct {
-	ID          int    `json:"id"`
-	Classname   string `json:"classname"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Category    string `json:"category"`
-	Revision    int    `json:"revision"`
-	// Add other fields as needed
-}
+const (
+	IconBaseURL      = "https://images.habbo.com/dcr/hof_furni/%s/"
+	FurniDataBaseURL = "https://origins.habbo.com/gamedata/furnidata_json/6e9408e1a9015a995c15203f246d8d2d61c5f72d"
+)
+
+var (
+	furniData     map[string]FurniData
+	externalTexts map[string]string
+)
 
 type FurniData struct {
-	RoomItemTypes struct {
-		FurniType []FurniItem `json:"furnitype"`
-	} `json:"roomitemtypes"`
+	ID         int    `json:"id"`
+	ClassName  string `json:"classname"`
+	Revision   int    `json:"revision"`
+	Name       string `json:"name"`
+	Rare       bool   `json:"rare"`
+	ExternalID string `json:"externalid"`
 }
 
-var GlobalFurniData FurniData
-var FurniMap map[string]FurniItem
+func init() {
+	furniData = make(map[string]FurniData)
+	externalTexts = make(map[string]string)
+}
 
-func LoadFurniData() error {
-	// Get the directory of the current file
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return fmt.Errorf("unable to get the current file path")
+func GetIconURL(classname string, itemType string, props string) string {
+	// Replace * with _ in the classname for icon URL
+	classnameForIcon := strings.ReplaceAll(classname, "*", "_")
+
+	var iconURL string
+	if itemType == "I" { // For wall items (posters)
+		revision := "56783" // Use a fixed revision for posters
+		iconURL = fmt.Sprintf("%s%s%s_icon.png", fmt.Sprintf(IconBaseURL, revision), "poster", props)
+	} else {
+		// For regular items
+		furni, ok := furniData[classname]
+		if !ok {
+			log.Printf("Furni data not found for classname: %s", classname)
+			return "" // Return an empty string if furni data not found
+		}
+
+		revision := fmt.Sprintf("%d", furni.Revision)
+		iconURL = fmt.Sprintf("%s%s_icon.png", fmt.Sprintf(IconBaseURL, revision), classnameForIcon)
 	}
-	currentDir := filepath.Dir(filename)
 
-	// Construct the path to furnidata.json
-	jsonPath := filepath.Join(currentDir, "furnidata.json")
+	log.Printf("Requesting icon URL for classname %s: %s", classname, iconURL)
+	return iconURL
+}
 
-	fmt.Printf("Attempting to load furnidata from: %s\n", jsonPath)
+func GetItemName(class string, itemType string, props string) string {
+	var key string
+	if itemType == "I" {
+		key = fmt.Sprintf("poster_%s_name", props)
+	} else {
+		key = fmt.Sprintf("furni_%s_name", class)
+	}
 
-	data, err := os.ReadFile(jsonPath)
+	name, ok := externalTexts[key]
+	if ok && name != "" {
+		return name
+	}
+
+	// If the name is not found in external texts, use the class (and prop for posters)
+	if itemType == "I" {
+		return fmt.Sprintf("%s_%s", class, props)
+	} else {
+		return class
+	}
+}
+
+func LoadFurniData(gameHost string) error {
+	resp, err := http.Get(FurniDataBaseURL)
 	if err != nil {
-		return fmt.Errorf("failed to read furnidata.json: %w", err)
+		return err
 	}
+	defer resp.Body.Close()
 
-	err = json.Unmarshal(data, &GlobalFurniData)
+	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to unmarshal furnidata: %w", err)
+		return err
 	}
 
-	// Create a map for easier access
-	FurniMap = make(map[string]FurniItem)
-	for _, item := range GlobalFurniData.RoomItemTypes.FurniType {
-		FurniMap[item.Classname] = item
+	var data struct {
+		RoomItemTypes struct {
+			FurniType []FurniData `json:"furnitype"`
+		} `json:"roomitemtypes"`
 	}
 
-	fmt.Printf("Loaded %d furni items\n", len(FurniMap))
+	err = json.Unmarshal(body, &data)
+	if err != nil {
+		return err
+	}
+
+	furniData = make(map[string]FurniData)
+	for _, furni := range data.RoomItemTypes.FurniType {
+		furniData[furni.ClassName] = furni
+	}
+
+	log.Printf("Furni data map: %+v", furniData)
 
 	return nil
 }
 
-func GetFurniItem(classname string) (FurniItem, bool) {
-	item, ok := FurniMap[classname]
-	return item, ok
-}
+func LoadExternalTexts(gameHost string) error {
+	externalTextsURL := fmt.Sprintf("https://origins-gamedata.habbo.com/external_texts/1")
 
-func GetIconPath(classname string) string {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return ""
+	resp, err := http.Get(externalTextsURL)
+	if err != nil {
+		return err
 	}
-	currentDir := filepath.Dir(filename)
-	return filepath.Join(currentDir, "icons", classname+"_icon.png")
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(body), "\n")
+	for _, line := range lines {
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			externalTexts[key] = value
+		}
+	}
+
+	log.Printf("Loaded %d external texts", len(externalTexts))
+	return nil
 }

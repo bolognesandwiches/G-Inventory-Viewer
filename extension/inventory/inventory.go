@@ -3,9 +3,7 @@ package inventory
 import (
 	"fmt"
 	"log"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bolognesandwiches/G-Inventory-Viewer/extension/furnidata"
@@ -15,23 +13,28 @@ import (
 )
 
 type Manager struct {
-	items       map[int]inventory.Item
-	mutex       sync.Mutex
-	updateGUIFn func([]EnrichedItem)
-	ext         *g.Ext
-	isScanning  bool
-	firstItemId int
+	inventoryMgr *inventory.Manager
+	updateGUIFn  func([]EnrichedItem)
+	ext          *g.Ext
+	isScanning   bool
+	isCounted    map[int]bool
+	scanningDone chan bool
+	allItems     []EnrichedItem
 }
 
 type EnrichedItem struct {
 	inventory.Item
-	FurniData furnidata.FurniItem
-	IconPath  string
+	Name    string
+	IconURL string
 }
 
-func NewManager() *Manager {
+func NewManager(ext *g.Ext) *Manager {
 	return &Manager{
-		items: make(map[int]inventory.Item),
+		inventoryMgr: inventory.NewManager(ext),
+		ext:          ext,
+		isCounted:    make(map[int]bool),
+		scanningDone: make(chan bool),
+		allItems:     make([]EnrichedItem, 0),
 	}
 }
 
@@ -39,100 +42,102 @@ func (m *Manager) SetUpdateCallback(fn func([]EnrichedItem)) {
 	m.updateGUIFn = fn
 }
 
-func (m *Manager) SetExt(ext *g.Ext) {
-	m.ext = ext
+func (m *Manager) ScanInventory() {
+	go func() {
+		time.Sleep(5 * time.Second) // Wait a bit after connecting
+		m.isScanning = true
+		m.isCounted = make(map[int]bool)
+		m.allItems = make([]EnrichedItem, 0)
+
+		m.ext.Send(out.GETSTRIP, []byte("update"))
+		<-m.scanningDone
+		m.displayInventory()
+	}()
 }
 
 func (m *Manager) HandleStripInfo2(e *g.Intercept) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered in HandleStripInfo2: %v", r)
+		}
+	}()
+
+	if !m.isScanning {
+		return
+	}
+
 	var inv inventory.Inventory
 	e.Packet.Read(&inv)
 
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
 	if len(inv.Items) == 0 {
 		m.isScanning = false
-		log.Println("Received empty page, stopping scan")
+		m.scanningDone <- true
 		return
 	}
 
-	if m.firstItemId == 0 {
-		m.firstItemId = inv.Items[0].ItemId
-	} else if inv.Items[0].ItemId == m.firstItemId {
-		m.isScanning = false
-		log.Println("Looped back to first item, stopping scan")
-		return
-	}
-
+	newItemFound := false
 	for _, item := range inv.Items {
-		m.items[item.ItemId] = item
+		if !m.isCounted[item.ItemId] {
+			m.isCounted[item.ItemId] = true
+			enrichedItem := m.enrichItem(item)
+			m.allItems = append(m.allItems, enrichedItem)
+			newItemFound = true
+		}
 	}
 
-	log.Printf("Received %d items", len(inv.Items))
+	if !newItemFound {
+		// If no new items were found in this page, we've scanned the entire inventory
+		m.isScanning = false
+		m.scanningDone <- true
+		return
+	}
 
 	if m.isScanning {
-		// Request next page
 		go func() {
-			time.Sleep(100 * time.Millisecond) // Small delay to avoid flooding
+			time.Sleep(500 * time.Millisecond) // Small delay to avoid flooding
 			m.ext.Send(out.GETSTRIP, []byte("next"))
 		}()
 	}
 
-	m.updateGUIFn(m.getEnrichedItems())
-}
-
-func (m *Manager) StartScanning() {
-	m.mutex.Lock()
-	m.isScanning = true
-	m.firstItemId = 0
-	m.items = make(map[int]inventory.Item) // Clear existing items
-	m.mutex.Unlock()
-
-	m.ext.Send(out.GETSTRIP, []byte("update"))
-}
-
-func (m *Manager) getEnrichedItems() []EnrichedItem {
-	var enrichedItems []EnrichedItem
-	for _, item := range m.items {
-		enrichedItem := EnrichedItem{
-			Item: item,
-		}
-		if furniData, ok := furnidata.GetFurniItem(item.Class); ok {
-			enrichedItem.FurniData = furniData
-			enrichedItem.IconPath = furnidata.GetIconPath(item.Class)
-		} else {
-			enrichedItem.FurniData = furnidata.FurniItem{
-				Name:        item.Class,
-				Description: "No description available",
-				Classname:   item.Class,
-			}
-			enrichedItem.IconPath = furnidata.GetIconPath("unknown")
-		}
-		enrichedItems = append(enrichedItems, enrichedItem)
+	if m.updateGUIFn != nil {
+		m.updateGUIFn(m.allItems)
+	} else {
+		log.Println("Error: updateGUIFn is nil in HandleStripInfo2")
 	}
+}
 
-	sort.Slice(enrichedItems, func(i, j int) bool {
-		return enrichedItems[i].FurniData.Name < enrichedItems[j].FurniData.Name
-	})
+func (m *Manager) enrichItem(item inventory.Item) EnrichedItem {
+	name := furnidata.GetItemName(item.Class, string(item.Type), item.Props)
+	iconURL := furnidata.GetIconURL(item.Class, string(item.Type), item.Props)
 
-	return enrichedItems
+	return EnrichedItem{
+		Item:    item,
+		Name:    name,
+		IconURL: iconURL,
+	}
+}
+
+func (m *Manager) displayInventory() {
+	if m.updateGUIFn != nil {
+		m.updateGUIFn(m.allItems)
+	}
 }
 
 func (m *Manager) GetInventorySummary() string {
-	items := m.getEnrichedItems()
 	itemCounts := make(map[string]int)
 
-	for _, item := range items {
-		itemCounts[item.Class]++
+	for _, item := range m.allItems {
+		name := furnidata.GetItemName(item.Class, string(item.Type), item.Props)
+		itemCounts[name]++
 	}
 
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("Total unique items: %d\n", len(itemCounts)))
-	summary.WriteString(fmt.Sprintf("Total items: %d\n", len(items)))
+	summary.WriteString(fmt.Sprintf("Total items: %d\n", len(m.allItems)))
 	summary.WriteString("------------------\n")
 
-	for class, count := range itemCounts {
-		summary.WriteString(fmt.Sprintf("%s: %d\n", class, count))
+	for name, count := range itemCounts {
+		summary.WriteString(fmt.Sprintf("%s: %d\n", name, count))
 	}
 
 	return summary.String()

@@ -14,14 +14,15 @@ import (
 )
 
 type Manager struct {
-	inventoryMgr *inventory.Manager
-	updateGUIFn  func([]EnrichedItem)
-	ext          *g.Ext
-	isScanning   bool
-	isCounted    map[int]bool
-	mu           sync.Mutex // Mutex to handle concurrent access to isCounted and allItems
-	scanningDone chan bool
-	allItems     []EnrichedItem
+	inventoryMgr     *inventory.Manager
+	updateGUIFn      func([]EnrichedItem)
+	ext              *g.Ext
+	isScanning       bool
+	isCounted        map[int]bool
+	mu               sync.Mutex
+	scanningDone     chan bool
+	allItems         []EnrichedItem
+	scanStateChanged func(bool)
 }
 
 type EnrichedItem struct {
@@ -37,6 +38,7 @@ func NewManager(ext *g.Ext) *Manager {
 		isCounted:    make(map[int]bool),
 		scanningDone: make(chan bool),
 		allItems:     make([]EnrichedItem, 0),
+		isScanning:   false,
 	}
 }
 
@@ -44,18 +46,38 @@ func (m *Manager) SetUpdateCallback(fn func([]EnrichedItem)) {
 	m.updateGUIFn = fn
 }
 
+func (m *Manager) SetScanStateChangedCallback(callback func(bool)) {
+	m.scanStateChanged = callback
+}
+
 func (m *Manager) ScanInventory() {
+	m.mu.Lock()
+	if m.isScanning {
+		m.mu.Unlock()
+		return
+	}
+	m.isScanning = true
+	m.isCounted = make(map[int]bool)
+	m.allItems = make([]EnrichedItem, 0)
+	m.mu.Unlock()
+
+	if m.scanStateChanged != nil {
+		m.scanStateChanged(true)
+	}
+
 	go func() {
 		time.Sleep(5 * time.Second) // Wait a bit after connecting
-		m.mu.Lock()
-		m.isScanning = true
-		m.isCounted = make(map[int]bool)
-		m.allItems = make([]EnrichedItem, 0)
-		m.mu.Unlock()
-
 		m.ext.Send(out.GETSTRIP, []byte("update"))
 		<-m.scanningDone
 		m.displayInventory()
+
+		m.mu.Lock()
+		m.isScanning = false
+		m.mu.Unlock()
+
+		if m.scanStateChanged != nil {
+			m.scanStateChanged(false)
+		}
 	}()
 }
 
@@ -74,12 +96,9 @@ func (m *Manager) HandleStripInfo2(e *g.Intercept) {
 	m.mu.Unlock()
 
 	var inv inventory.Inventory
-	e.Packet.Read(&inv) // Read packet without assignment
+	e.Packet.Read(&inv)
 
 	if len(inv.Items) == 0 {
-		m.mu.Lock()
-		m.isScanning = false
-		m.mu.Unlock()
 		m.scanningDone <- true
 		return
 	}
@@ -89,37 +108,25 @@ func (m *Manager) HandleStripInfo2(e *g.Intercept) {
 		m.mu.Lock()
 		if !m.isCounted[item.ItemId] {
 			m.isCounted[item.ItemId] = true
-			m.mu.Unlock()
-
 			enrichedItem := m.enrichItem(item)
-			m.mu.Lock()
 			m.allItems = append(m.allItems, enrichedItem)
-			m.mu.Unlock()
 			newItemFound = true
-		} else {
-			m.mu.Unlock()
 		}
+		m.mu.Unlock()
 	}
 
 	if !newItemFound {
-		m.mu.Lock()
-		m.isScanning = false
-		m.mu.Unlock()
 		m.scanningDone <- true
 		return
 	}
 
-	if m.isScanning {
-		go func() {
-			time.Sleep(500 * time.Millisecond) // Small delay to avoid flooding
-			m.ext.Send(out.GETSTRIP, []byte("next"))
-		}()
-	}
+	go func() {
+		time.Sleep(500 * time.Millisecond) // Small delay to avoid flooding
+		m.ext.Send(out.GETSTRIP, []byte("next"))
+	}()
 
 	if m.updateGUIFn != nil {
 		m.updateGUIFn(m.allItems)
-	} else {
-		log.Println("Error: updateGUIFn is nil in HandleStripInfo2")
 	}
 }
 
@@ -160,4 +167,21 @@ func (m *Manager) GetInventorySummary() string {
 	}
 
 	return summary.String()
+}
+
+func (m *Manager) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.isScanning = false
+	m.isCounted = make(map[int]bool)
+	m.allItems = make([]EnrichedItem, 0)
+	// Clear the channel if it's not empty
+	select {
+	case <-m.scanningDone:
+	default:
+	}
+
+	if m.scanStateChanged != nil {
+		m.scanStateChanged(false)
+	}
 }

@@ -16,7 +16,7 @@ import (
 var ext = g.NewExt(g.ExtInfo{
 	Title:       "G-itemViewer",
 	Description: "View all items in your room and hand",
-	Version:     "0.1.0",
+	Version:     "0.1.1",
 	Author:      "madlad",
 })
 
@@ -46,20 +46,27 @@ func main() {
 		log.Printf("Extension initialized (connected=%t)", args.Connected)
 	})
 
-	// Handle extension activation
 	ext.Activated(func() {
 		log.Println("Extension activated")
-		uiManager.ShowWindow() // Show the GUI window on activation
+		inventoryManager.Reset()
+		roomManager.Reset()
+
+		// Re-register packet interceptions
+		ext.Intercept(in.STRIPINFO_2).With(inventoryManager.HandleStripInfo2)
+
+		uiManager.ShowWindow()
 		go func() {
-			time.Sleep(5 * time.Second)      // Ensure all initial setup is complete
-			inventoryManager.ScanInventory() // Automatically start scanning inventory
+			time.Sleep(5 * time.Second)
+			inventoryManager.ScanInventory()
 		}()
 	})
 
 	// Handle disconnection
 	ext.Disconnected(func() {
 		log.Println("Disconnected from server")
-		uiManager.HideWindow() // Hide the GUI window on disconnection
+		inventoryManager.Reset()
+		roomManager.Reset()
+		uiManager.CloseWindow() // Close the window instead of hiding it
 	})
 
 	// Run the extension

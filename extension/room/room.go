@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bolognesandwiches/G-Inventory-Viewer/extension/furnidata"
 	g "xabbo.b7c.io/goearth"
@@ -15,6 +16,10 @@ type Manager struct {
 	ext         *g.Ext
 	updateGUIFn func([]EnrichedItem)
 	allItems    []EnrichedItem
+	mu          sync.Mutex
+	isScanning  bool
+	roomObjects []room.Object
+	roomItems   room.Items
 }
 
 type EnrichedItem struct {
@@ -32,45 +37,64 @@ type EnrichedItem struct {
 }
 
 func NewManager(ext *g.Ext) *Manager {
-	return &Manager{
+	mgr := &Manager{
 		ext:      ext,
 		allItems: make([]EnrichedItem, 0),
 	}
+	ext.Intercept(in.ACTIVEOBJECTS).With(mgr.captureRoomObjects)
+	ext.Intercept(in.ITEMS).With(mgr.captureRoomItems)
+	return mgr
 }
 
 func (m *Manager) SetUpdateCallback(fn func([]EnrichedItem)) {
 	m.updateGUIFn = fn
 }
 
-func (m *Manager) ScanRoom() {
-	m.allItems = make([]EnrichedItem, 0)
-	m.ext.Intercept(in.ACTIVEOBJECTS).With(m.handleActiveObjects)
-	m.ext.Intercept(in.ITEMS).With(m.handleItems)
-}
-
-func (m *Manager) handleActiveObjects(e *g.Intercept) {
+func (m *Manager) captureRoomObjects(e *g.Intercept) {
 	var objects []room.Object
 	e.Packet.Read(&objects)
+	m.mu.Lock()
+	m.roomObjects = objects
+	m.mu.Unlock()
+}
 
-	for _, obj := range objects {
+func (m *Manager) captureRoomItems(e *g.Intercept) {
+	var items room.Items
+	e.Packet.Read(&items)
+	m.mu.Lock()
+	m.roomItems = items
+	m.mu.Unlock()
+}
+
+func (m *Manager) ScanRoom() {
+	m.mu.Lock()
+	if m.isScanning {
+		m.mu.Unlock()
+		return
+	}
+	m.isScanning = true
+	m.allItems = make([]EnrichedItem, 0)
+	roomObjects := m.roomObjects
+	roomItems := m.roomItems
+	m.mu.Unlock()
+
+	// Process room objects
+	for _, obj := range roomObjects {
 		enrichedItem := m.enrichFloorItem(obj)
 		m.allItems = append(m.allItems, enrichedItem)
 	}
 
-	if m.updateGUIFn != nil {
-		m.updateGUIFn(m.allItems)
-	}
-}
-
-func (m *Manager) handleItems(e *g.Intercept) {
-	var items room.Items
-	e.Packet.Read(&items)
-
-	for _, item := range items {
+	// Process room items
+	for _, item := range roomItems {
 		enrichedItem := m.enrichWallItem(item)
 		m.allItems = append(m.allItems, enrichedItem)
 	}
 
+	m.mu.Lock()
+	m.isScanning = false
+	m.mu.Unlock()
+
+	// Update GUI with final results
 	if m.updateGUIFn != nil {
 		m.updateGUIFn(m.allItems)
 	}
@@ -118,6 +142,9 @@ func (m *Manager) enrichWallItem(item room.Item) EnrichedItem {
 }
 
 func (m *Manager) GetRoomSummary() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	itemCounts := make(map[string]int)
 
 	for _, item := range m.allItems {
@@ -137,6 +164,9 @@ func (m *Manager) GetRoomSummary() string {
 }
 
 func (m *Manager) GetItemDetails() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	var details strings.Builder
 
 	for _, item := range m.allItems {
@@ -155,4 +185,13 @@ func (m *Manager) GetItemDetails() string {
 	}
 
 	return details.String()
+}
+
+func (m *Manager) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.isScanning = false
+	m.allItems = make([]EnrichedItem, 0)
+	m.roomObjects = nil
+	m.roomItems = nil
 }

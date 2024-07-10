@@ -34,12 +34,27 @@ type Manager struct {
 	roomItemsEntry    *widget.Entry
 	app               fyne.App
 	mu                sync.Mutex // Mutex to handle concurrent access
+	scanButton        *customScanButton
 }
 
 func NewManager(invManager *inventory.Manager, roomManager *room.Manager) *Manager {
-	return &Manager{
+	m := &Manager{
 		inventoryManager: invManager,
 		roomManager:      roomManager,
+	}
+
+	if invManager != nil {
+		invManager.SetScanStateChangedCallback(m.updateScanButtonState)
+	}
+
+	return m
+}
+
+func (m *Manager) updateScanButtonState(isScanning bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.scanButton != nil {
+		m.scanButton.SetActive(isScanning)
 	}
 }
 
@@ -79,6 +94,7 @@ func (m *Manager) Run() {
 	roomSummaryTab := m.setupRoomSummaryTab()
 
 	tabs := NewCustomTabContainer("Inventory", "Room")
+	m.scanButton = tabs.scanButton // Store the scan button reference
 	tabs.Refresh()
 
 	content := container.NewMax()
@@ -212,7 +228,7 @@ func (m *Manager) createTitledContainer(content fyne.CanvasObject, title string)
 	titleText := canvas.NewText(title, color.White)
 	titleText.Alignment = fyne.TextAlignCenter
 	titleText.TextStyle = fyne.TextStyle{Bold: true}
-	titleText.TextSize = 10
+	titleText.TextSize = 0
 	titleText.TextStyle.Monospace = true
 	return container.NewBorder(titleText, nil, nil, nil, content)
 }
@@ -291,6 +307,18 @@ func (m *Manager) updateInventoryDisplay(items []inventory.EnrichedItem) {
 	}
 
 	m.iconContainer.Refresh()
+}
+
+func (m *Manager) CloseWindow() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.window != nil {
+		m.window.Close()
+		m.window = nil
+	}
+	if m.app != nil {
+		m.app.Quit()
+	}
 }
 
 func (m *Manager) updateRoomDisplay(items []room.EnrichedItem) {
@@ -373,51 +401,84 @@ func (m *Manager) updateRoomDisplay(items []room.EnrichedItem) {
 
 type customScanButton struct {
 	widget.Button
+	icon   *canvas.Image
+	label  *widget.Label
+	active bool
 }
 
 func newCustomScanButton(icon fyne.Resource, tapped func()) *customScanButton {
 	button := &customScanButton{}
 	button.ExtendBaseWidget(button)
-	button.SetIcon(icon)
+	button.icon = canvas.NewImageFromResource(icon)
+	button.icon.FillMode = canvas.ImageFillOriginal
+	button.label = widget.NewLabel("Search")
+	button.label.Alignment = fyne.TextAlignLeading // Align text to the left
+	button.label.TextStyle = fyne.TextStyle{Bold: true}
 	button.OnTapped = tapped
 	button.Importance = widget.LowImportance
-	button.Alignment = widget.ButtonAlignCenter
+	button.active = false
 	return button
 }
 
+func (b *customScanButton) SetActive(active bool) {
+	b.active = active
+	if active {
+		b.icon.Resource = loadScanIconActive()
+		b.label.SetText("Searching...")
+	} else {
+		b.icon.Resource = loadScanIconInactive()
+		b.label.SetText("Search")
+	}
+	b.Refresh()
+}
+
 func (b *customScanButton) CreateRenderer() fyne.WidgetRenderer {
-	return &customButtonRenderer{button: &b.Button}
+	background := canvas.NewRectangle(color.NRGBA{R: 212, G: 221, B: 225, A: 255})
+	background.StrokeColor = color.Black
+	background.StrokeWidth = 1.35
+	background.CornerRadius = 5
+
+	return &customButtonRenderer{
+		button:     b,
+		background: background,
+	}
 }
 
 type customButtonRenderer struct {
-	button *widget.Button
-	icon   *canvas.Image
+	button     *customScanButton
+	background *canvas.Rectangle
 }
 
 func (r *customButtonRenderer) Destroy() {}
 
 func (r *customButtonRenderer) Layout(size fyne.Size) {
-	if r.icon == nil {
-		r.icon = canvas.NewImageFromResource(r.button.Icon)
-	}
-	r.icon.Resize(size)
+	r.background.Resize(size)
+	iconSize := fyne.NewSize(16, 16)
+	r.button.icon.Resize(iconSize)
+	r.button.icon.Move(fyne.NewPos(8, (size.Height-iconSize.Height)/2))
+
+	labelSize := r.button.label.MinSize()
+	r.button.label.Resize(labelSize)
+	r.button.label.Move(fyne.NewPos(20, (size.Height-labelSize.Height)/2))
 }
 
 func (r *customButtonRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(30, 30) // Adjust size as needed
+	return fyne.NewSize(100, 22)
 }
 
 func (r *customButtonRenderer) Objects() []fyne.CanvasObject {
-	if r.icon == nil {
-		r.icon = canvas.NewImageFromResource(r.button.Icon)
-	}
-	return []fyne.CanvasObject{r.icon}
+	return []fyne.CanvasObject{r.background, r.button.icon, r.button.label}
 }
 
 func (r *customButtonRenderer) Refresh() {
-	if r.icon != nil {
-		r.icon.Refresh()
+	if r.button.active {
+		r.background.FillColor = color.NRGBA{R: 212, G: 221, B: 225, A: 255} // Light blue for active
+	} else {
+		r.background.FillColor = color.NRGBA{R: 136, G: 173, B: 189, A: 255} // Darker blue for inactive
 	}
+	r.background.Refresh()
+	r.button.icon.Refresh()
+	r.button.label.Refresh()
 }
 
 type CustomTabContainer struct {
@@ -453,7 +514,8 @@ func NewCustomTabContainer(items ...string) *CustomTabContainer {
 		c.tabs[0].selected = true
 	}
 
-	c.scanButton = newCustomScanButton(loadScanIcon(), func() {})
+	c.scanButton = newCustomScanButton(loadScanIconInactive(), func() {})
+	c.scanButton.SetActive(false)
 
 	c.Refresh()
 
@@ -481,24 +543,27 @@ func (r *customTabContainerRenderer) MinSize() fyne.Size {
 		}
 	}
 	scanButtonSize := r.container.scanButton.MinSize()
-	width += scanButtonSize.Width
-	if scanButtonSize.Height > height {
-		height = scanButtonSize.Height
-	}
+	width = fyne.Max(width, scanButtonSize.Width)
+	height += scanButtonSize.Height - 5 // Account for overlap
 	return fyne.NewSize(width, height)
 }
 
 func (r *customTabContainerRenderer) Layout(size fyne.Size) {
-	tabWidth := (size.Width - r.container.scanButton.MinSize().Width) / float32(len(r.container.tabs))
+	tabHeight := size.Height - 5 // Reduce tab height to make room for overlapping button
+	tabWidth := size.Width / float32(len(r.container.tabs))
+
 	for i, tab := range r.container.tabs {
-		tab.Resize(fyne.NewSize(tabWidth, size.Height))
+		tab.Resize(fyne.NewSize(tabWidth, tabHeight))
 		tab.Move(fyne.NewPos(float32(i)*tabWidth, 0))
 	}
 
-	// Position scan button to the right of tabs
-	scanButtonSize := r.container.scanButton.MinSize()
+	// Position scan button to overlap slightly with the bottom of the first tab
+	scanButtonSize := fyne.NewSize(100, 22)
 	r.container.scanButton.Resize(scanButtonSize)
-	r.container.scanButton.Move(fyne.NewPos(size.Width-scanButtonSize.Width, (size.Height-scanButtonSize.Height)/2))
+	r.container.scanButton.Move(fyne.NewPos(
+		0,           // Align with the left edge of the first tab
+		tabHeight-5, // Overlap by 5 pixels
+	))
 }
 
 func (r *customTabContainerRenderer) Refresh() {
@@ -581,7 +646,7 @@ func (r *customTabRenderer) Refresh() {
 	}
 	r.text.Color = color.Black
 	r.outline.StrokeColor = color.Black
-	r.outline.StrokeWidth = 3
+	r.outline.StrokeWidth = 5
 	r.outline.FillColor = color.Transparent
 
 	r.background.CornerRadius = 5
@@ -602,13 +667,21 @@ func (t *customTab) Tapped(*fyne.PointEvent) {
 	t.onTapped()
 }
 
-func loadScanIcon() fyne.Resource {
-	iconData, err := ioutil.ReadFile("assets/scan_icon.png")
+func loadScanIconActive() fyne.Resource {
+	return loadIconResource("assets/scan_icon_active.png")
+}
+
+func loadScanIconInactive() fyne.Resource {
+	return loadIconResource("assets/scan_icon_inactive.png")
+}
+
+func loadIconResource(path string) fyne.Resource {
+	iconData, err := ioutil.ReadFile(path)
 	if err != nil {
-		log.Printf("Failed to load scan icon: %v", err)
+		log.Printf("Failed to load icon: %v", err)
 		return theme.SearchIcon()
 	}
-	return fyne.NewStaticResource("scan_icon", iconData)
+	return fyne.NewStaticResource(path, iconData)
 }
 
 type habboTheme struct{}

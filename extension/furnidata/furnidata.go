@@ -45,6 +45,8 @@ var specialNameMappings = map[string]string{
 	"Imperial Teleport":      "Imperial Teleports",
 	"poster_5003":            "Purple Garland",
 	"poster_5000":            "Green Garland",
+	"Club Sofa":              "Club sofa",
+	"Dicemaster":             "Dice Master",
 }
 
 func init() {

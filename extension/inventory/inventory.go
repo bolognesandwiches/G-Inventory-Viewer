@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -23,6 +24,8 @@ type Manager struct {
 	scanningDone     chan bool
 	allItems         []EnrichedItem
 	scanStateChanged func(bool)
+	ctx              context.Context
+	cancel           context.CancelFunc
 }
 
 type EnrichedItem struct {
@@ -32,6 +35,7 @@ type EnrichedItem struct {
 }
 
 func NewManager(ext *g.Ext) *Manager {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		inventoryMgr: inventory.NewManager(ext),
 		ext:          ext,
@@ -39,6 +43,8 @@ func NewManager(ext *g.Ext) *Manager {
 		scanningDone: make(chan bool),
 		allItems:     make([]EnrichedItem, 0),
 		isScanning:   false,
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
@@ -66,17 +72,28 @@ func (m *Manager) ScanInventory() {
 	}
 
 	go func() {
-		time.Sleep(5 * time.Second) // Wait a bit after connecting
-		m.ext.Send(out.GETSTRIP, []byte("update"))
-		<-m.scanningDone
-		m.displayInventory()
+		defer func() {
+			m.mu.Lock()
+			m.isScanning = false
+			m.mu.Unlock()
 
-		m.mu.Lock()
-		m.isScanning = false
-		m.mu.Unlock()
+			if m.scanStateChanged != nil {
+				m.scanStateChanged(false)
+			}
+		}()
 
-		if m.scanStateChanged != nil {
-			m.scanStateChanged(false)
+		select {
+		case <-time.After(5 * time.Second):
+			m.ext.Send(out.GETSTRIP, []byte("update"))
+		case <-m.ctx.Done():
+			return
+		}
+
+		select {
+		case <-m.scanningDone:
+			m.displayInventory()
+		case <-m.ctx.Done():
+			return
 		}
 	}()
 }
@@ -121,8 +138,12 @@ func (m *Manager) HandleStripInfo2(e *g.Intercept) {
 	}
 
 	go func() {
-		time.Sleep(500 * time.Millisecond) // Small delay to avoid flooding
-		m.ext.Send(out.GETSTRIP, []byte("next"))
+		select {
+		case <-time.After(500 * time.Millisecond):
+			m.ext.Send(out.GETSTRIP, []byte("next"))
+		case <-m.ctx.Done():
+			return
+		}
 	}()
 
 	if m.updateGUIFn != nil {
@@ -152,18 +173,22 @@ func (m *Manager) GetInventorySummary() string {
 	defer m.mu.Unlock()
 
 	itemCounts := make(map[string]int)
+	totalHC := 0.0
 	for _, item := range m.allItems {
 		name := furnidata.GetItemName(item.Class, string(item.Type), item.Props)
 		itemCounts[name]++
+		totalHC += furnidata.GetHCValue(name)
 	}
 
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("Total unique items: %d\n", len(itemCounts)))
 	summary.WriteString(fmt.Sprintf("Total items: %d\n", len(m.allItems)))
+	summary.WriteString(fmt.Sprintf("Total wealth: %.2f HC\n", totalHC))
 	summary.WriteString("------------------\n")
 
 	for name, count := range itemCounts {
-		summary.WriteString(fmt.Sprintf("%s: %d\n", name, count))
+		hcValue := furnidata.GetHCValue(name)
+		summary.WriteString(fmt.Sprintf("%s: %d (%.2f HC)\n", name, count, hcValue))
 	}
 
 	return summary.String()
@@ -172,10 +197,14 @@ func (m *Manager) GetInventorySummary() string {
 func (m *Manager) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.cancel()
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+
 	m.isScanning = false
 	m.isCounted = make(map[int]bool)
 	m.allItems = make([]EnrichedItem, 0)
-	// Clear the channel if it's not empty
+
 	select {
 	case <-m.scanningDone:
 	default:

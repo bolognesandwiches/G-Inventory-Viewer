@@ -1,6 +1,7 @@
 package room
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -20,6 +21,8 @@ type Manager struct {
 	isScanning  bool
 	roomObjects []room.Object
 	roomItems   room.Items
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 type EnrichedItem struct {
@@ -37,9 +40,12 @@ type EnrichedItem struct {
 }
 
 func NewManager(ext *g.Ext) *Manager {
+	ctx, cancel := context.WithCancel(context.Background())
 	mgr := &Manager{
 		ext:      ext,
 		allItems: make([]EnrichedItem, 0),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 	ext.Intercept(in.ACTIVEOBJECTS).With(mgr.captureRoomObjects)
 	ext.Intercept(in.ITEMS).With(mgr.captureRoomItems)
@@ -78,26 +84,44 @@ func (m *Manager) ScanRoom() {
 	roomItems := m.roomItems
 	m.mu.Unlock()
 
-	// Process room objects
-	for _, obj := range roomObjects {
-		enrichedItem := m.enrichFloorItem(obj)
-		m.allItems = append(m.allItems, enrichedItem)
-	}
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			m.isScanning = false
+			m.mu.Unlock()
+		}()
 
-	// Process room items
-	for _, item := range roomItems {
-		enrichedItem := m.enrichWallItem(item)
-		m.allItems = append(m.allItems, enrichedItem)
-	}
+		// Process room objects
+		for _, obj := range roomObjects {
+			select {
+			case <-m.ctx.Done():
+				return
+			default:
+				enrichedItem := m.enrichFloorItem(obj)
+				m.mu.Lock()
+				m.allItems = append(m.allItems, enrichedItem)
+				m.mu.Unlock()
+			}
+		}
 
-	m.mu.Lock()
-	m.isScanning = false
-	m.mu.Unlock()
+		// Process room items
+		for _, item := range roomItems {
+			select {
+			case <-m.ctx.Done():
+				return
+			default:
+				enrichedItem := m.enrichWallItem(item)
+				m.mu.Lock()
+				m.allItems = append(m.allItems, enrichedItem)
+				m.mu.Unlock()
+			}
+		}
 
-	// Update GUI with final results
-	if m.updateGUIFn != nil {
-		m.updateGUIFn(m.allItems)
-	}
+		// Update GUI with final results
+		if m.updateGUIFn != nil {
+			m.updateGUIFn(m.allItems)
+		}
+	}()
 }
 
 func (m *Manager) enrichFloorItem(obj room.Object) EnrichedItem {
@@ -146,18 +170,23 @@ func (m *Manager) GetRoomSummary() string {
 	defer m.mu.Unlock()
 
 	itemCounts := make(map[string]int)
+	totalHC := 0.0
 
 	for _, item := range m.allItems {
 		itemCounts[item.Name]++
+		hcValue := furnidata.GetHCValue(item.Name)
+		totalHC += hcValue
 	}
 
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("Total unique items: %d\n", len(itemCounts)))
 	summary.WriteString(fmt.Sprintf("Total items: %d\n", len(m.allItems)))
+	summary.WriteString(fmt.Sprintf("Total wealth: %.2f HC\n", totalHC))
 	summary.WriteString("------------------\n")
 
 	for name, count := range itemCounts {
-		summary.WriteString(fmt.Sprintf("%s: %d\n", name, count))
+		hcValue := furnidata.GetHCValue(name)
+		summary.WriteString(fmt.Sprintf("%s: %d (%.2f HC)\n", name, count, hcValue))
 	}
 
 	return summary.String()
@@ -190,6 +219,10 @@ func (m *Manager) GetItemDetails() string {
 func (m *Manager) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.cancel()
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+
 	m.isScanning = false
 	m.allItems = make([]EnrichedItem, 0)
 	m.roomObjects = nil

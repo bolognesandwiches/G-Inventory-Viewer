@@ -13,12 +13,14 @@ import (
 const (
 	IconBaseURL      = "https://images.habbo.com/dcr/hof_furni/%s/"
 	FurniDataBaseURL = "https://origins.habbo.com/gamedata/furnidata_json/6e9408e1a9015a995c15203f246d8d2d61c5f72d"
+	APIItemsURL      = "https://tc-api.serversia.com/items"
 )
 
 var (
 	furniData     map[string]FurniData
 	externalTexts map[string]string
-	mu            sync.Mutex
+	apiItems      map[string]APIItem
+	mu            sync.RWMutex
 )
 
 type FurniData struct {
@@ -30,28 +32,42 @@ type FurniData struct {
 	ExternalID string `json:"externalid"`
 }
 
+type APIItem struct {
+	ID    int     `json:"id"`
+	Name  string  `json:"name"`
+	Slug  string  `json:"slug"`
+	HCVal float64 `json:"hc_val"`
+}
+
+var specialNameMappings = map[string]string{
+	"Habbo Cola Machine":     "Cola Machine",
+	"Bonnie Blonde's Pillow": "Purple Velvet Pillow",
+	"Imperial Teleport":      "Imperial Teleports",
+	"poster_5003":            "Purple Garland",
+	"poster_5000":            "Green Garland",
+}
+
 func init() {
 	furniData = make(map[string]FurniData)
 	externalTexts = make(map[string]string)
+	apiItems = make(map[string]APIItem)
 }
 
 func GetIconURL(classname string, itemType string, props string) string {
-	mu.Lock()
-	defer mu.Unlock()
+	mu.RLock()
+	defer mu.RUnlock()
 
-	// Replace * with _ in the classname for icon URL
 	classnameForIcon := strings.ReplaceAll(classname, "*", "_")
 
 	var iconURL string
-	if itemType == "I" { // For wall items (posters)
-		revision := "56783" // Use a fixed revision for posters
+	if itemType == "I" {
+		revision := "56783"
 		iconURL = fmt.Sprintf("%s%s%s_icon.png", fmt.Sprintf(IconBaseURL, revision), "poster", props)
 	} else {
-		// For regular items
 		furni, ok := furniData[classname]
 		if !ok {
 			log.Printf("Furni data not found for classname: %s", classname)
-			return "" // Return an empty string if furni data not found
+			return ""
 		}
 
 		revision := fmt.Sprintf("%d", furni.Revision)
@@ -63,8 +79,8 @@ func GetIconURL(classname string, itemType string, props string) string {
 }
 
 func GetItemName(class string, itemType string, props string) string {
-	mu.Lock()
-	defer mu.Unlock()
+	mu.RLock()
+	defer mu.RUnlock()
 
 	var key string
 	if itemType == "I" {
@@ -78,7 +94,6 @@ func GetItemName(class string, itemType string, props string) string {
 		return name
 	}
 
-	// If the name is not found in external texts, use the class (and prop for posters)
 	if itemType == "I" {
 		return fmt.Sprintf("%s_%s", class, props)
 	} else {
@@ -149,4 +164,46 @@ func LoadExternalTexts(gameHost string) error {
 
 	log.Printf("Loaded %d external texts", len(externalTexts))
 	return nil
+}
+
+func LoadAPIItems() error {
+	resp, err := http.Get(APIItemsURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var items []APIItem
+	err = json.NewDecoder(resp.Body).Decode(&items)
+	if err != nil {
+		return err
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	apiItems = make(map[string]APIItem)
+	for _, item := range items {
+		apiItems[item.Name] = item
+	}
+
+	log.Printf("Loaded %d API items", len(apiItems))
+	return nil
+}
+
+func GetHCValue(itemName string) float64 {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	// Check for special mappings
+	if mappedName, ok := specialNameMappings[itemName]; ok {
+		itemName = mappedName
+	}
+
+	if item, ok := apiItems[itemName]; ok {
+		return item.HCVal
+	}
+
+	log.Printf("No HC value found for item name: %s", itemName)
+	return 0
 }

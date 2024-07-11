@@ -1,11 +1,9 @@
-// File: common/common.go
 package common
 
 import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"strings"
 
@@ -41,7 +39,6 @@ type APIItem struct {
 	HCVal float64 `json:"hc_val"`
 }
 
-// Enriched types
 type EnrichedInventoryItem struct {
 	inventory.Item
 	Name    string
@@ -51,19 +48,24 @@ type EnrichedInventoryItem struct {
 
 type EnrichedRoomObject struct {
 	room.Object
-	Name    string
-	IconURL string
-	HCValue float64
+	Name      string
+	IconURL   string
+	HCValue   float64
+	Width     int
+	Height    int
+	X         int
+	Y         int
+	Direction int
 }
 
 type EnrichedRoomItem struct {
 	room.Item
-	Name    string
-	IconURL string
-	HCValue float64
+	Name     string
+	IconURL  string
+	HCValue  float64
+	Location string
 }
 
-// Functions from furnidata.go
 func GetItemName(class string, itemType string, props string) string {
 	var key string
 	if itemType == "I" {
@@ -94,7 +96,6 @@ func GetIconURL(classname string, itemType string, props string) string {
 	} else {
 		furni, ok := furniData[classname]
 		if !ok {
-			log.Printf("Furni data not found for classname: %s", classname)
 			return ""
 		}
 
@@ -102,15 +103,28 @@ func GetIconURL(classname string, itemType string, props string) string {
 		iconURL = fmt.Sprintf("%s%s_icon.png", fmt.Sprintf(IconBaseURL, revision), classnameForIcon)
 	}
 
-	log.Printf("Requesting icon URL for classname %s: %s", classname, iconURL)
 	return iconURL
 }
 
+var specialNameMappings = map[string]string{
+	"Habbo Cola Machine":     "Cola Machine",
+	"Bonnie Blonde's Pillow": "Purple Velvet Pillow",
+	"Imperial Teleport":      "Imperial Teleports",
+	"poster_5003":            "Purple Garland",
+	"poster_5000":            "Green Garland",
+	"Club sofa":              "Club Sofa",
+	"Dicemaster":             "Dice Master",
+}
+
 func GetHCValue(itemName string) float64 {
+	if mappedName, exists := specialNameMappings[itemName]; exists {
+		itemName = mappedName
+	}
+
 	if item, ok := apiItems[itemName]; ok {
 		return item.HCVal
 	}
-	log.Printf("No HC value found for item name: %s", itemName)
+
 	return 0
 }
 
@@ -142,7 +156,6 @@ func LoadFurniData(gameHost string) error {
 		furniData[furni.ClassName] = furni
 	}
 
-	log.Printf("Furni data map: %+v", furniData)
 	return nil
 }
 
@@ -171,7 +184,6 @@ func LoadExternalTexts(gameHost string) error {
 		}
 	}
 
-	log.Printf("Loaded %d external texts", len(externalTexts))
 	return nil
 }
 
@@ -193,11 +205,9 @@ func LoadAPIItems() error {
 		apiItems[item.Name] = item
 	}
 
-	log.Printf("Loaded %d API items", len(apiItems))
 	return nil
 }
 
-// Functions from enrichment.go
 func EnrichInventoryItem(item inventory.Item) EnrichedInventoryItem {
 	return EnrichedInventoryItem{
 		Item:    item,
@@ -209,23 +219,28 @@ func EnrichInventoryItem(item inventory.Item) EnrichedInventoryItem {
 
 func EnrichRoomObject(obj room.Object) EnrichedRoomObject {
 	return EnrichedRoomObject{
-		Object:  obj,
-		Name:    GetItemName(obj.Class, "S", ""),
-		IconURL: GetIconURL(obj.Class, "S", ""),
-		HCValue: GetHCValue(GetItemName(obj.Class, "S", "")),
+		Object:    obj,
+		Name:      GetItemName(obj.Class, "S", ""),
+		IconURL:   GetIconURL(obj.Class, "S", ""),
+		HCValue:   GetHCValue(GetItemName(obj.Class, "S", "")),
+		Width:     obj.Width,
+		Height:    obj.Height,
+		X:         obj.X,
+		Y:         obj.Y,
+		Direction: obj.Direction,
 	}
 }
 
 func EnrichRoomItem(item room.Item) EnrichedRoomItem {
 	return EnrichedRoomItem{
-		Item:    item,
-		Name:    GetItemName(item.Class, "I", item.Type),
-		IconURL: GetIconURL(item.Class, "I", item.Type),
-		HCValue: GetHCValue(GetItemName(item.Class, "I", item.Type)),
+		Item:     item,
+		Name:     GetItemName(item.Class, "I", item.Type),
+		IconURL:  GetIconURL(item.Class, "I", item.Type),
+		HCValue:  GetHCValue(GetItemName(item.Class, "I", item.Type)),
+		Location: item.Location,
 	}
 }
 
-// Functions from summary.go
 func GetInventorySummary(items map[int]inventory.Item) string {
 	itemCounts := make(map[string]int)
 	totalHC := 0.0
@@ -239,7 +254,7 @@ func GetInventorySummary(items map[int]inventory.Item) string {
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("Total unique items: %d\n", len(itemCounts)))
 	summary.WriteString(fmt.Sprintf("Total items: %d\n", len(items)))
-	summary.WriteString(fmt.Sprintf("Total wealth: %.2f HC\n", totalHC))
+	summary.WriteString(fmt.Sprintf("Total wealth: %.2f HC (values from traderclub.gg)\n", totalHC))
 	summary.WriteString("------------------\n")
 
 	for name, count := range itemCounts {
@@ -269,7 +284,7 @@ func GetRoomSummary(objects map[int]room.Object, items map[int]room.Item) string
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("Total unique items: %d\n", len(itemCounts)))
 	summary.WriteString(fmt.Sprintf("Total items: %d\n", len(objects)+len(items)))
-	summary.WriteString(fmt.Sprintf("Total wealth: %.2f HC\n", totalHC))
+	summary.WriteString(fmt.Sprintf("Total wealth: %.2f HC (values from traderclub.gg)\n", totalHC))
 	summary.WriteString("------------------\n")
 
 	for name, count := range itemCounts {

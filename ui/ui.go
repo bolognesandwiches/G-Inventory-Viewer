@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"image/color"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -16,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"github.com/bolognesandwiches/G-Inventory-Viewer/common"
 	"xabbo.b7c.io/goearth/shockwave/inventory"
 	"xabbo.b7c.io/goearth/shockwave/room"
 )
@@ -39,12 +40,14 @@ type Manager struct {
 	app               fyne.App
 	mu                sync.Mutex
 	scanButton        *customScanButton
+	scanCallback      func()
 }
 
-func NewManager(invManager *inventory.Manager, roomManager *room.Manager) *Manager {
+func NewManager(invManager *inventory.Manager, roomManager *room.Manager, scanCallback func()) *Manager {
 	m := &Manager{
 		inventoryManager: invManager,
 		roomManager:      roomManager,
+		scanCallback:     scanCallback,
 	}
 
 	return m
@@ -60,7 +63,6 @@ func (m *Manager) Run() {
 	m.window = m.app.NewWindow("G-itemViewer")
 	m.mu.Unlock()
 
-	// Load header icons
 	leftIcon, _ := m.loadImage("left_icon.png")
 	rightIcon, _ := m.loadImage("right_icon.png")
 	leftIconImage := canvas.NewImageFromResource(leftIcon)
@@ -70,12 +72,10 @@ func (m *Manager) Run() {
 	leftIconImage.SetMinSize(fyne.NewSize(100, 27))
 	rightIconImage.SetMinSize(fyne.NewSize(100, 27))
 
-	// Create title text
 	titleText := canvas.NewText("G-itemViewer", color.White)
 	titleText.Alignment = fyne.TextAlignCenter
 	titleText.TextStyle = fyne.TextStyle{Bold: true}
 
-	// Create header container
 	header := container.NewHBox(
 		leftIconImage,
 		layout.NewSpacer(),
@@ -98,12 +98,13 @@ func (m *Manager) Run() {
 		case 0:
 			content.Objects = []fyne.CanvasObject{inventoryTab}
 			tabs.scanButton.OnTapped = func() {
-				m.inventoryManager.Update()
+				if m.scanCallback != nil {
+					m.scanCallback()
+				}
 			}
 		case 1:
 			content.Objects = []fyne.CanvasObject{roomSummaryTab}
 			tabs.scanButton.OnTapped = func() {
-				// Trigger room scan (you might need to implement this in the room manager)
 			}
 		}
 		content.Refresh()
@@ -158,6 +159,15 @@ func (m *Manager) CloseWindow() {
 	}
 	if m.app != nil {
 		m.app.Quit()
+	}
+}
+
+func (m *Manager) SetScanButtonActive(active bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.scanButton != nil {
+		m.scanButton.SetActive(active)
+		m.scanButton.Refresh()
 	}
 }
 
@@ -240,44 +250,36 @@ func (m *Manager) UpdateInventoryDisplay(items map[int]inventory.Item) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var displayText string
-	iconURLs := make(map[string][]inventory.Item)
-	placeholderItems := make(map[string][]inventory.Item)
+	enrichedItems := make(map[string][]common.EnrichedInventoryItem)
 
 	for _, item := range items {
-		displayText += fmt.Sprintf("%s (%s)\n", item.Class, item.Type)
-		if strings.HasSuffix(item.Class, "placeholder_icon.png") {
-			key := item.Class
-			if item.Props != "" {
-				key += fmt.Sprintf(" (%s)", item.Props)
-			}
-			placeholderItems[key] = append(placeholderItems[key], item)
-		} else {
-			iconURLs[item.Class] = append(iconURLs[item.Class], item)
-		}
+		enrichedItem := common.EnrichInventoryItem(item)
+		enrichedItems[enrichedItem.Class] = append(enrichedItems[enrichedItem.Class], enrichedItem)
 	}
 
-	m.inventoryText.SetText(displayText)
-	m.summaryText.SetText(summary.GetInventorySummary(items))
+	m.summaryText.SetText(common.GetInventorySummary(items))
 
 	m.iconContainer.Objects = nil
 
-	createButton := func(iconURL string, items []inventory.Item) *widget.Button {
+	createButton := func(items []common.EnrichedInventoryItem) *widget.Button {
 		btn := widget.NewButton("", func() {
-			var itemIDsText strings.Builder
-			itemIDsText.WriteString(fmt.Sprintf("Name: %s\n", items[0].Class))
-			itemIDsText.WriteString(fmt.Sprintf("Count: %d\n", len(items)))
-			itemIDsText.WriteString("IDs:\n")
+			var details strings.Builder
+			details.WriteString(fmt.Sprintf("Name: %s\n", items[0].Name))
+			details.WriteString(fmt.Sprintf("Count: %d\n", len(items)))
+			totalHCValue := items[0].HCValue * float64(len(items))
+			details.WriteString(fmt.Sprintf("HC Value: %.2f\n", totalHCValue))
+			details.WriteString("Item IDs:\n")
 			for _, item := range items {
-				itemIDsText.WriteString(fmt.Sprintf("%d\n", item.ItemId))
+				details.WriteString(fmt.Sprintf("%d\n", item.ItemId))
 			}
-			m.inventoryText.SetText(itemIDsText.String())
+			m.inventoryText.SetText(details.String())
 		})
 
 		btn.SetIcon(theme.AccountIcon())
 		btn.Resize(fyne.NewSize(44, 44))
 
 		go func() {
+			iconURL := items[0].IconURL
 			resp, err := http.Get(iconURL)
 			if err != nil {
 				return
@@ -297,71 +299,78 @@ func (m *Manager) UpdateInventoryDisplay(items map[int]inventory.Item) {
 		return btn
 	}
 
-	for iconURL, items := range iconURLs {
-		button := createButton(iconURL, items)
-		m.iconContainer.Add(button)
-	}
-
-	for _, items := range placeholderItems {
-		button := createButton("https://images.habbo.com/dcr/hof_furni/56783/placeholder_icon.png", items)
+	for _, items := range enrichedItems {
+		button := createButton(items)
 		m.iconContainer.Add(button)
 	}
 
 	m.iconContainer.Refresh()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		m.SetScanButtonActive(false)
+	}()
 }
 
 func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]room.Item) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var displayText string
-	iconURLs := make(map[string][]interface{})
-	placeholderItems := make(map[string][]interface{})
+	enrichedObjects := make(map[string][]common.EnrichedRoomObject)
+	enrichedItems := make(map[string][]common.EnrichedRoomItem)
 
 	for _, obj := range objects {
-		enrichedObj := EnrichRoomObject(obj)
-		displayText += fmt.Sprintf("%s (Object)\n", enrichedObj.Name)
-		if strings.HasSuffix(enrichedObj.IconURL, "placeholder_icon.png") {
-			placeholderItems[enrichedObj.IconURL] = append(placeholderItems[enrichedObj.IconURL], enrichedObj)
-		} else {
-			iconURLs[enrichedObj.IconURL] = append(iconURLs[enrichedObj.IconURL], enrichedObj)
-		}
+		enrichedObj := common.EnrichRoomObject(obj)
+		enrichedObjects[enrichedObj.Class] = append(enrichedObjects[enrichedObj.Class], enrichedObj)
 	}
 
 	for _, item := range items {
-		enrichedItem := EnrichRoomItem(item)
-		displayText += fmt.Sprintf("%s (Item)\n", enrichedItem.Name)
-		if strings.HasSuffix(enrichedItem.IconURL, "placeholder_icon.png") {
-			placeholderItems[enrichedItem.IconURL] = append(placeholderItems[enrichedItem.IconURL], enrichedItem)
-		} else {
-			iconURLs[enrichedItem.IconURL] = append(iconURLs[enrichedItem.IconURL], enrichedItem)
-		}
+		enrichedItem := common.EnrichRoomItem(item)
+		enrichedItems[enrichedItem.Class] = append(enrichedItems[enrichedItem.Class], enrichedItem)
 	}
 
-	m.roomText.SetText(displayText)
-	m.roomSummaryText.SetText(summary.GetRoomSummary(objects, items))
+	m.roomSummaryText.SetText(common.GetRoomSummary(objects, items))
 
 	m.roomIconContainer.Objects = nil
 
-	createButton := func(iconURL string, items []interface{}) *widget.Button {
+	createButton := func(items interface{}) *widget.Button {
 		btn := widget.NewButton("", func() {
-			var itemIDsText strings.Builder
-			itemIDsText.WriteString(fmt.Sprintf("Name: %s\n", getItemName(items[0])))
-			itemIDsText.WriteString(fmt.Sprintf("Count: %d\n", len(items)))
-			itemIDsText.WriteString("IDs:\n")
-			for _, item := range items {
-				itemID := getItemID(item)
-				if itemID != "" {
-					itemIDsText.WriteString(fmt.Sprintf("%s\n", itemID))
+			var details strings.Builder
+			switch v := items.(type) {
+			case []common.EnrichedRoomObject:
+				details.WriteString(fmt.Sprintf("Name: %s\n", v[0].Name))
+				details.WriteString(fmt.Sprintf("Count: %d\n", len(v)))
+				totalHCValue := v[0].HCValue * float64(len(v))
+				details.WriteString(fmt.Sprintf("HC Value: %.2f\n", totalHCValue))
+				details.WriteString("Item Details:\n")
+				for _, obj := range v {
+					details.WriteString(fmt.Sprintf("%d (W:%d, H:%d, X:%d, Y:%d, Dir:%d)\n",
+						obj.Id, obj.Width, obj.Height, obj.X, obj.Y, obj.Direction))
+				}
+			case []common.EnrichedRoomItem:
+				details.WriteString(fmt.Sprintf("Name: %s\n", v[0].Name))
+				details.WriteString(fmt.Sprintf("Count: %d\n", len(v)))
+				totalHCValue := v[0].HCValue * float64(len(v))
+				details.WriteString(fmt.Sprintf("HC Value: %.2f\n", totalHCValue))
+				details.WriteString("Item Details:\n")
+				for _, item := range v {
+					details.WriteString(fmt.Sprintf("%d (Location: %s)\n", item.Id, item.Location))
 				}
 			}
-			m.roomText.SetText(itemIDsText.String())
+			m.roomText.SetText(details.String())
 		})
 
 		btn.SetIcon(theme.AccountIcon())
 		btn.Resize(fyne.NewSize(44, 44))
 
 		go func() {
+			var iconURL string
+			switch v := items.(type) {
+			case []common.EnrichedRoomObject:
+				iconURL = v[0].IconURL
+			case []common.EnrichedRoomItem:
+				iconURL = v[0].IconURL
+			}
 			resp, err := http.Get(iconURL)
 			if err != nil {
 				return
@@ -381,13 +390,13 @@ func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]r
 		return btn
 	}
 
-	for iconURL, items := range iconURLs {
-		button := createButton(iconURL, items)
+	for _, objects := range enrichedObjects {
+		button := createButton(objects)
 		m.roomIconContainer.Add(button)
 	}
 
-	for _, items := range placeholderItems {
-		button := createButton("https://images.habbo.com/dcr/hof_furni/56783/placeholder_icon.png", items)
+	for _, items := range enrichedItems {
+		button := createButton(items)
 		m.roomIconContainer.Add(button)
 	}
 
@@ -396,21 +405,10 @@ func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]r
 
 func getItemName(item interface{}) string {
 	switch v := item.(type) {
-	case EnrichedRoomObject:
+	case common.EnrichedRoomObject:
 		return v.Name
-	case EnrichedRoomItem:
+	case common.EnrichedRoomItem:
 		return v.Name
-	default:
-		return "Unknown"
-	}
-}
-
-func getItemClass(item interface{}) string {
-	switch v := item.(type) {
-	case room.Object:
-		return v.Class
-	case room.Item:
-		return v.Class
 	default:
 		return "Unknown"
 	}
@@ -418,9 +416,9 @@ func getItemClass(item interface{}) string {
 
 func getItemID(item interface{}) string {
 	switch v := item.(type) {
-	case EnrichedRoomObject:
+	case common.EnrichedRoomObject:
 		return fmt.Sprintf("%d", v.Id)
-	case EnrichedRoomItem:
+	case common.EnrichedRoomItem:
 		return fmt.Sprintf("%d", v.Id)
 	default:
 		return ""
@@ -713,7 +711,6 @@ func (t *customTab) Tapped(*fyne.PointEvent) {
 func loadScanIconActive() fyne.Resource {
 	res, err := (&Manager{}).loadImage("scan_icon_active.png")
 	if err != nil {
-		log.Printf("Failed to load scan_icon_active.png: %v", err)
 		return theme.SearchIcon()
 	}
 	return res
@@ -722,7 +719,6 @@ func loadScanIconActive() fyne.Resource {
 func loadScanIconInactive() fyne.Resource {
 	res, err := (&Manager{}).loadImage("scan_icon_inactive.png")
 	if err != nil {
-		log.Printf("Failed to load scan_icon_inactive.png: %v", err)
 		return theme.SearchIcon()
 	}
 	return res
@@ -795,7 +791,6 @@ var resourceVolterGoldfishBoldTtf = loadFontResource("Volter_Goldfish_bold.ttf")
 func loadFontResource(filename string) fyne.Resource {
 	res, err := (&Manager{}).loadImage(filename)
 	if err != nil {
-		log.Printf("Failed to load font %s: %v", filename, err)
 		return theme.DefaultTextFont()
 	}
 	return res

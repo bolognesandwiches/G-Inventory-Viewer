@@ -1,13 +1,15 @@
 package main
 
 import (
-	"log"
 	"runtime"
 	"sync"
+	"time"
 
+	"github.com/bolognesandwiches/G-Inventory-Viewer/common"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/ui"
 	g "xabbo.b7c.io/goearth"
 	"xabbo.b7c.io/goearth/shockwave/inventory"
+	"xabbo.b7c.io/goearth/shockwave/out"
 	"xabbo.b7c.io/goearth/shockwave/room"
 )
 
@@ -18,40 +20,105 @@ var ext = g.NewExt(g.ExtInfo{
 	Author:      "madlad",
 })
 
-type ExtensionManager struct {
-	inventoryManager *inventory.Manager
-	roomManager      *room.Manager
-	uiManager        *ui.Manager
-	assetManager     *AssetManager
+var (
+	lock           sync.Mutex
+	inventoryMgr   = inventory.NewManager(ext)
+	roomMgr        = room.NewManager(ext)
+	uiManager      *ui.Manager
+	assetManager   = NewAssetManager()
+	isCountingHand bool
+	isCounted      = make(map[int]bool)
+	refreshed      bool
+	retrievedItems = make(map[int]inventory.Item)
+)
+
+func init() {
+	uiManager = ui.NewManager(inventoryMgr, roomMgr, startInventoryCount)
 }
 
-func NewExtensionManager() *ExtensionManager {
-	inventoryManager := inventory.NewManager(ext)
-	roomManager := room.NewManager(ext)
-	uiManager := ui.NewManager(inventoryManager, roomManager)
-	assetManager := NewAssetManager()
+func startInventoryCount() {
+	lock.Lock()
+	defer lock.Unlock()
 
-	return &ExtensionManager{
-		inventoryManager: inventoryManager,
-		roomManager:      roomManager,
-		uiManager:        uiManager,
-		assetManager:     assetManager,
+	clear(isCounted)
+	clear(retrievedItems)
+	refreshed = false
+	isCountingHand = true
+
+	uiManager.SetScanButtonActive(true)
+
+	inventoryMgr.Update()
+}
+
+func tickCounter() {
+	lock.Lock()
+	defer lock.Unlock()
+
+	if !isCountingHand {
+		return
+	}
+
+	if !refreshed {
+		refreshed = true
+		inventoryMgr.Update()
+		return
+	}
+
+	isDone := len(inventoryMgr.Items()) == 0
+	for _, item := range inventoryMgr.Items() {
+		if isCounted[item.ItemId] {
+			isDone = true
+			continue
+		}
+		retrievedItems[item.ItemId] = item
+		isCounted[item.ItemId] = true
+	}
+
+	if isDone {
+		uiManager.UpdateInventoryDisplay(retrievedItems)
+		isCountingHand = false
+	} else {
+		ext.Send(out.GETSTRIP, []byte("next"))
 	}
 }
 
-func (em *ExtensionManager) Initialize() {
-	em.inventoryManager.Updated(func() {
-		items := em.inventoryManager.Items()
-		go em.uiManager.UpdateInventoryDisplay(items)
+func main() {
+	runtime.LockOSThread()
+
+	go func() {
+		for range time.Tick(time.Millisecond * 600) {
+			tickCounter()
+		}
+	}()
+
+	roomMgr.ObjectsLoaded(func(args room.ObjectsArgs) {
+		go uiManager.UpdateRoomDisplay(roomMgr.Objects, roomMgr.Items)
 	})
 
-	em.roomManager.ObjectsLoaded(func(args room.ObjectsArgs) {
-		go em.uiManager.UpdateRoomDisplay(em.roomManager.Objects, em.roomManager.Items)
+	roomMgr.ItemsLoaded(func(args room.ItemsArgs) {
+		go uiManager.UpdateRoomDisplay(roomMgr.Objects, roomMgr.Items)
 	})
 
-	em.roomManager.ItemsLoaded(func(args room.ItemsArgs) {
-		go em.uiManager.UpdateRoomDisplay(em.roomManager.Objects, em.roomManager.Items)
+	ext.Connected(func(args g.ConnectArgs) {
+		go assetManager.LoadAssets(args.Host)
 	})
+
+	ext.Initialized(func(args g.InitArgs) {
+	})
+
+	ext.Activated(func() {
+		uiManager.ShowWindow()
+	})
+
+	ext.Disconnected(func() {
+		uiManager.CloseWindow()
+	})
+
+	go func() {
+		ext.RunE()
+	}()
+
+	uiManager.Run()
 }
 
 type AssetManager struct {
@@ -96,46 +163,40 @@ func (am *AssetManager) LoadAssets(host string) {
 		close(errChan)
 	}()
 
-	for err := range errChan {
-		log.Printf("Asset loading error: %v", err)
+	for range errChan {
 	}
-
-	log.Println("Asset loading complete")
 }
 
 func (am *AssetManager) loadFurniData(host string) error {
-	err := LoadFurniData(host)
+	err := common.LoadFurniData(host)
 	if err != nil {
 		return err
 	}
 	am.mu.Lock()
 	am.furniDataLoaded = true
 	am.mu.Unlock()
-	log.Println("Furni data loaded successfully")
 	return nil
 }
 
 func (am *AssetManager) loadExternalTexts(host string) error {
-	err := LoadExternalTexts(host)
+	err := common.LoadExternalTexts(host)
 	if err != nil {
 		return err
 	}
 	am.mu.Lock()
 	am.externalTextsLoaded = true
 	am.mu.Unlock()
-	log.Println("External texts loaded successfully")
 	return nil
 }
 
 func (am *AssetManager) loadIcons() error {
-	err := LoadAPIItems()
+	err := common.LoadAPIItems()
 	if err != nil {
 		return err
 	}
 	am.mu.Lock()
 	am.iconsLoaded = true
 	am.mu.Unlock()
-	log.Println("Icons loaded successfully")
 	return nil
 }
 
@@ -143,41 +204,4 @@ func (am *AssetManager) AreAssetsLoaded() bool {
 	am.mu.RLock()
 	defer am.mu.RUnlock()
 	return am.furniDataLoaded && am.externalTextsLoaded && am.iconsLoaded
-}
-
-func main() {
-	runtime.LockOSThread()
-
-	log.Println("Starting G-itemViewer")
-
-	em := NewExtensionManager()
-	em.Initialize()
-
-	ext.Connected(func(args g.ConnectArgs) {
-		log.Println("Connected to server:", args.Host)
-		go em.assetManager.LoadAssets(args.Host)
-		em.inventoryManager.Update() // Request inventory update when connected
-	})
-
-	ext.Initialized(func(args g.InitArgs) {
-		log.Printf("Extension initialized (connected=%t)", args.Connected)
-	})
-
-	ext.Activated(func() {
-		log.Println("Extension activated")
-		em.uiManager.ShowWindow()
-	})
-
-	ext.Disconnected(func() {
-		log.Println("Disconnected from server")
-		em.uiManager.CloseWindow()
-	})
-
-	go func() {
-		if err := ext.RunE(); err != nil {
-			log.Printf("Error running extension: %v", err)
-		}
-	}()
-
-	em.uiManager.Run()
 }

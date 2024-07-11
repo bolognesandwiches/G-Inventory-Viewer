@@ -16,7 +16,7 @@ import (
 var ext = g.NewExt(g.ExtInfo{
 	Title:       "G-itemViewer",
 	Description: "View all items in your room and hand",
-	Version:     "0.1.1",
+	Version:     "0.2.0",
 	Author:      "madlad",
 })
 

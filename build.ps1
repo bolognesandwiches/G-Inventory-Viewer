@@ -1,6 +1,6 @@
 $Name = "G-itemViewer"
-$ProjectPath = $PSScriptRoot  # This will set the path to the directory containing the script
-$ExtPath = (Get-Item $ProjectPath).Parent.FullName  # This will set the path to the parent directory (Ext)
+$ProjectPath = $PSScriptRoot
+$GEarthExtPath = "C:\Users\atwym\Downloads\Windows.x64 (1)\Extensions\G-itemViewer"
 
 # Ensure we're in the correct directory
 Set-Location $ProjectPath
@@ -21,35 +21,13 @@ $env:GOARCH = "amd64"
 windres -i icon.rc -o icon.syso -O coff
 
 # Build the executable with the icon
-go build -o "bin/${Name}-win.exe" -ldflags="-H=windowsgui" .
+go build -o "bin/${Name}-win.exe" -ldflags="-H=windowsgui -X main.Version=$(git describe --tags --always --dirty)" .
 
 # Remove the temporary files
 Remove-Item icon.rc
 Remove-Item icon.syso
 
 echo "Build complete."
-
-# Copy necessary assets
-echo "Copying assets..."
-
-# Create assets directory in bin if it doesn't exist
-New-Item -ItemType Directory -Force -Path "bin/assets"
-
-# Copy scan icon and app icon
-Copy-Item -Path "assets/scan_icon.png" -Destination "bin/assets/scan_icon.png" -Force
-Copy-Item -Path "assets/app_icon.ico" -Destination "bin/assets/app_icon.ico" -Force
-
-# Copy fonts
-Copy-Item -Path "$ExtPath/Volter_Goldfish.ttf" -Destination "bin/Volter_Goldfish.ttf" -Force
-Copy-Item -Path "$ExtPath/Volter_Goldfish_bold.ttf" -Destination "bin/Volter_Goldfish_bold.ttf" -Force
-
-# Copy fonts to assets folder as well (for redundancy)
-Copy-Item -Path "$ExtPath/Volter_Goldfish.ttf" -Destination "bin/assets/Volter_Goldfish.ttf" -Force
-Copy-Item -Path "$ExtPath/Volter_Goldfish_bold.ttf" -Destination "bin/assets/Volter_Goldfish_bold.ttf" -Force
-
-echo "Asset copying complete."
-
-echo "Creating distribution folder..."
 
 # Create distribution folder
 $distPath = "dist/windows"
@@ -58,11 +36,24 @@ New-Item -ItemType Directory -Force -Path $distPath
 # Copy the executable
 Copy-Item -Path "bin/${Name}-win.exe" -Destination "$distPath/${Name}.exe" -Force
 
-# Copy assets folder
-Copy-Item -Path "bin/assets" -Destination "$distPath" -Recurse -Force
+# Copy to G-Earth extensions directory
+echo "Copying to G-Earth extensions directory..."
+New-Item -ItemType Directory -Force -Path $GEarthExtPath
+Copy-Item -Path "$distPath/${Name}.exe" -Destination $GEarthExtPath -Force
 
-# Copy fonts to root of distribution folder
-Copy-Item -Path "bin/Volter_Goldfish.ttf" -Destination "$distPath/Volter_Goldfish.ttf" -Force
-Copy-Item -Path "bin/Volter_Goldfish_bold.ttf" -Destination "$distPath/Volter_Goldfish_bold.ttf" -Force
+echo "Build and installation complete."
 
-echo "Distribution folder created."
+# Create a batch file to run the executable (optional, for testing)
+@"
+@echo off
+cd /d "%~dp0"
+start "" "${Name}.exe"
+"@ | Out-File -FilePath "$GEarthExtPath/Run_${Name}.bat" -Encoding ascii
+
+echo "Created run batch file in G-Earth extensions directory."
+
+# Optionally, create a ZIP file for distribution
+$zipPath = "dist/${Name}_$(git describe --tags --always --dirty).zip"
+Compress-Archive -Path "$distPath/*" -DestinationPath $zipPath -Force
+
+echo "Created ZIP file for distribution: $zipPath"

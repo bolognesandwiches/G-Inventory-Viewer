@@ -1,4 +1,4 @@
-package ui
+package main
 
 import (
 	"fmt"
@@ -16,8 +16,14 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/bolognesandwiches/G-Inventory-Viewer/extension/inventory"
-	"github.com/bolognesandwiches/G-Inventory-Viewer/extension/room"
+	"xabbo.b7c.io/goearth/shockwave/inventory"
+	"xabbo.b7c.io/goearth/shockwave/room"
+
+	"github.com/bolognesandwiches/G-Inventory-Viewer/summary"
+)
+
+const (
+	AssetServerBaseURL = "https://raw.githubusercontent.com/bolognesandwiches/G-Inventory-Viewer/master/assets/"
 )
 
 type Manager struct {
@@ -33,7 +39,7 @@ type Manager struct {
 	roomIconContainer *fyne.Container
 	roomItemsEntry    *widget.Entry
 	app               fyne.App
-	mu                sync.Mutex // Mutex to handle concurrent access
+	mu                sync.Mutex
 	scanButton        *customScanButton
 }
 
@@ -43,19 +49,7 @@ func NewManager(invManager *inventory.Manager, roomManager *room.Manager) *Manag
 		roomManager:      roomManager,
 	}
 
-	if invManager != nil {
-		invManager.SetScanStateChangedCallback(m.updateScanButtonState)
-	}
-
 	return m
-}
-
-func (m *Manager) updateScanButtonState(isScanning bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.scanButton != nil {
-		m.scanButton.SetActive(isScanning)
-	}
 }
 
 func (m *Manager) Run() {
@@ -63,18 +57,20 @@ func (m *Manager) Run() {
 	m.app = app.New()
 	customTheme := &habboTheme{}
 	m.app.Settings().SetTheme(customTheme)
-	icon, _ := fyne.LoadResourceFromPath("./assets/scan_icon.png")
+	icon, _ := m.loadImage("app_icon.ico")
 	m.app.SetIcon(icon)
 	m.window = m.app.NewWindow("G-itemViewer")
 	m.mu.Unlock()
 
 	// Load header icons
-	leftIcon := canvas.NewImageFromFile("./assets/left_icon.png")
-	rightIcon := canvas.NewImageFromFile("./assets/right_icon.png")
-	leftIcon.Resize(fyne.NewSize(100, 27))
-	rightIcon.Resize(fyne.NewSize(100, 27))
-	leftIcon.SetMinSize(fyne.NewSize(100, 27))
-	rightIcon.SetMinSize(fyne.NewSize(100, 27))
+	leftIcon, _ := m.loadImage("left_icon.png")
+	rightIcon, _ := m.loadImage("right_icon.png")
+	leftIconImage := canvas.NewImageFromResource(leftIcon)
+	rightIconImage := canvas.NewImageFromResource(rightIcon)
+	leftIconImage.Resize(fyne.NewSize(100, 27))
+	rightIconImage.Resize(fyne.NewSize(100, 27))
+	leftIconImage.SetMinSize(fyne.NewSize(100, 27))
+	rightIconImage.SetMinSize(fyne.NewSize(100, 27))
 
 	// Create title text
 	titleText := canvas.NewText("G-itemViewer", color.White)
@@ -83,18 +79,18 @@ func (m *Manager) Run() {
 
 	// Create header container
 	header := container.NewHBox(
-		leftIcon,
+		leftIconImage,
 		layout.NewSpacer(),
 		titleText,
 		layout.NewSpacer(),
-		rightIcon,
+		rightIconImage,
 	)
 
 	inventoryTab := m.setupInventoryTab()
 	roomSummaryTab := m.setupRoomSummaryTab()
 
 	tabs := NewCustomTabContainer("Inventory", "Room")
-	m.scanButton = tabs.scanButton // Store the scan button reference
+	m.scanButton = tabs.scanButton
 	tabs.Refresh()
 
 	content := container.NewMax()
@@ -104,12 +100,12 @@ func (m *Manager) Run() {
 		case 0:
 			content.Objects = []fyne.CanvasObject{inventoryTab}
 			tabs.scanButton.OnTapped = func() {
-				m.inventoryManager.ScanInventory()
+				m.inventoryManager.Update()
 			}
 		case 1:
 			content.Objects = []fyne.CanvasObject{roomSummaryTab}
 			tabs.scanButton.OnTapped = func() {
-				m.roomManager.ScanRoom()
+				// Trigger room scan (you might need to implement this in the room manager)
 			}
 		}
 		content.Refresh()
@@ -132,11 +128,8 @@ func (m *Manager) Run() {
 	m.window.Resize(fyne.NewSize(275, 300))
 	m.window.SetPadded(true)
 
-	m.inventoryManager.SetUpdateCallback(m.updateInventoryDisplay)
-	m.roomManager.SetUpdateCallback(m.updateRoomDisplay)
-
 	m.mu.Lock()
-	m.window.Hide() // Initially hide the window
+	m.window.Hide()
 	m.mu.Unlock()
 
 	m.window.ShowAndRun()
@@ -155,6 +148,18 @@ func (m *Manager) HideWindow() {
 	defer m.mu.Unlock()
 	if m.window != nil {
 		m.window.Hide()
+	}
+}
+
+func (m *Manager) CloseWindow() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.window != nil {
+		m.window.Close()
+		m.window = nil
+	}
+	if m.app != nil {
+		m.app.Quit()
 	}
 }
 
@@ -233,36 +238,36 @@ func (m *Manager) createTitledContainer(content fyne.CanvasObject, title string)
 	return container.NewBorder(titleText, nil, nil, nil, content)
 }
 
-func (m *Manager) updateInventoryDisplay(items []inventory.EnrichedItem) {
+func (m *Manager) UpdateInventoryDisplay(items map[int]inventory.Item) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var displayText string
-	iconURLs := make(map[string][]inventory.EnrichedItem)
-	placeholderItems := make(map[string][]inventory.EnrichedItem)
+	iconURLs := make(map[string][]inventory.Item)
+	placeholderItems := make(map[string][]inventory.Item)
 
 	for _, item := range items {
-		displayText += fmt.Sprintf("%s (%s)\n", item.Name, item.Class)
-		if strings.HasSuffix(item.IconURL, "placeholder_icon.png") {
+		displayText += fmt.Sprintf("%s (%s)\n", item.Class, item.Type)
+		if strings.HasSuffix(item.Class, "placeholder_icon.png") {
 			key := item.Class
 			if item.Props != "" {
 				key += fmt.Sprintf(" (%s)", item.Props)
 			}
 			placeholderItems[key] = append(placeholderItems[key], item)
 		} else {
-			iconURLs[item.IconURL] = append(iconURLs[item.IconURL], item)
+			iconURLs[item.Class] = append(iconURLs[item.Class], item)
 		}
 	}
 
 	m.inventoryText.SetText(displayText)
-	m.summaryText.SetText(m.inventoryManager.GetInventorySummary())
+	m.summaryText.SetText(summary.GetInventorySummary(items))
 
 	m.iconContainer.Objects = nil
 
-	createButton := func(iconURL string, items []inventory.EnrichedItem) *widget.Button {
+	createButton := func(iconURL string, items []inventory.Item) *widget.Button {
 		btn := widget.NewButton("", func() {
 			var itemIDsText strings.Builder
-			itemIDsText.WriteString(fmt.Sprintf("Name: %s\n", items[0].Name))
+			itemIDsText.WriteString(fmt.Sprintf("Name: %s\n", items[0].Class))
 			itemIDsText.WriteString(fmt.Sprintf("Count: %d\n", len(items)))
 			itemIDsText.WriteString("IDs:\n")
 			for _, item := range items {
@@ -277,14 +282,12 @@ func (m *Manager) updateInventoryDisplay(items []inventory.EnrichedItem) {
 		go func() {
 			resp, err := http.Get(iconURL)
 			if err != nil {
-				log.Printf("Error fetching icon: %v", err)
 				return
 			}
 			defer resp.Body.Close()
 
 			iconData, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
-				log.Printf("Error reading icon data: %v", err)
 				return
 			}
 
@@ -309,53 +312,49 @@ func (m *Manager) updateInventoryDisplay(items []inventory.EnrichedItem) {
 	m.iconContainer.Refresh()
 }
 
-func (m *Manager) CloseWindow() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.window != nil {
-		m.window.Close()
-		m.window = nil
-	}
-	if m.app != nil {
-		m.app.Quit()
-	}
-}
-
-func (m *Manager) updateRoomDisplay(items []room.EnrichedItem) {
+func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]room.Item) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var displayText string
-	iconURLs := make(map[string][]room.EnrichedItem)
-	placeholderItems := make(map[string][]room.EnrichedItem)
+	iconURLs := make(map[string][]interface{})
+	placeholderItems := make(map[string][]interface{})
+
+	for _, obj := range objects {
+		enrichedObj := EnrichRoomObject(obj)
+		displayText += fmt.Sprintf("%s (Object)\n", enrichedObj.Name)
+		if strings.HasSuffix(enrichedObj.IconURL, "placeholder_icon.png") {
+			placeholderItems[enrichedObj.IconURL] = append(placeholderItems[enrichedObj.IconURL], enrichedObj)
+		} else {
+			iconURLs[enrichedObj.IconURL] = append(iconURLs[enrichedObj.IconURL], enrichedObj)
+		}
+	}
 
 	for _, item := range items {
-		displayText += fmt.Sprintf("%s (%s)\n", item.Name, item.Class)
-		if strings.HasSuffix(item.IconURL, "placeholder_icon.png") {
-			key := item.Class
-			placeholderItems[key] = append(placeholderItems[key], item)
+		enrichedItem := EnrichRoomItem(item)
+		displayText += fmt.Sprintf("%s (Item)\n", enrichedItem.Name)
+		if strings.HasSuffix(enrichedItem.IconURL, "placeholder_icon.png") {
+			placeholderItems[enrichedItem.IconURL] = append(placeholderItems[enrichedItem.IconURL], enrichedItem)
 		} else {
-			iconURLs[item.IconURL] = append(iconURLs[item.IconURL], item)
+			iconURLs[enrichedItem.IconURL] = append(iconURLs[enrichedItem.IconURL], enrichedItem)
 		}
 	}
 
 	m.roomText.SetText(displayText)
-	m.roomSummaryText.SetText(m.roomManager.GetRoomSummary())
+	m.roomSummaryText.SetText(summary.GetRoomSummary(objects, items))
 
 	m.roomIconContainer.Objects = nil
 
-	createButton := func(iconURL string, items []room.EnrichedItem) *widget.Button {
+	createButton := func(iconURL string, items []interface{}) *widget.Button {
 		btn := widget.NewButton("", func() {
 			var itemIDsText strings.Builder
-			itemIDsText.WriteString(fmt.Sprintf("Name: %s\n", items[0].Name))
+			itemIDsText.WriteString(fmt.Sprintf("Name: %s\n", getItemName(items[0])))
 			itemIDsText.WriteString(fmt.Sprintf("Count: %d\n", len(items)))
 			itemIDsText.WriteString("IDs:\n")
 			for _, item := range items {
-				if item.Type == "S" {
-					itemIDsText.WriteString(fmt.Sprintf("%s (W:%d, H:%d, X:%d, Y:%d, Dir:%d)\n",
-						item.Id, item.Width, item.Height, item.X, item.Y, item.Direction))
-				} else {
-					itemIDsText.WriteString(fmt.Sprintf("%s (Location: %s)\n", item.Id, item.Location))
+				itemID := getItemID(item)
+				if itemID != "" {
+					itemIDsText.WriteString(fmt.Sprintf("%s\n", itemID))
 				}
 			}
 			m.roomText.SetText(itemIDsText.String())
@@ -367,14 +366,12 @@ func (m *Manager) updateRoomDisplay(items []room.EnrichedItem) {
 		go func() {
 			resp, err := http.Get(iconURL)
 			if err != nil {
-				log.Printf("Error fetching icon: %v", err)
 				return
 			}
 			defer resp.Body.Close()
 
 			iconData, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
-				log.Printf("Error reading icon data: %v", err)
 				return
 			}
 
@@ -399,6 +396,55 @@ func (m *Manager) updateRoomDisplay(items []room.EnrichedItem) {
 	m.roomIconContainer.Refresh()
 }
 
+func getItemName(item interface{}) string {
+	switch v := item.(type) {
+	case EnrichedRoomObject:
+		return v.Name
+	case EnrichedRoomItem:
+		return v.Name
+	default:
+		return "Unknown"
+	}
+}
+
+func getItemClass(item interface{}) string {
+	switch v := item.(type) {
+	case room.Object:
+		return v.Class
+	case room.Item:
+		return v.Class
+	default:
+		return "Unknown"
+	}
+}
+
+func getItemID(item interface{}) string {
+	switch v := item.(type) {
+	case EnrichedRoomObject:
+		return fmt.Sprintf("%d", v.Id)
+	case EnrichedRoomItem:
+		return fmt.Sprintf("%d", v.Id)
+	default:
+		return ""
+	}
+}
+
+func (m *Manager) loadImage(filename string) (fyne.Resource, error) {
+	url := AssetServerBaseURL + filename
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch image %s: %v", filename, err)
+	}
+	defer resp.Body.Close()
+
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read image data for %s: %v", filename, err)
+	}
+
+	return fyne.NewStaticResource(filename, data), nil
+}
+
 type customScanButton struct {
 	widget.Button
 	icon   *canvas.Image
@@ -412,7 +458,7 @@ func newCustomScanButton(icon fyne.Resource, tapped func()) *customScanButton {
 	button.icon = canvas.NewImageFromResource(icon)
 	button.icon.FillMode = canvas.ImageFillOriginal
 	button.label = widget.NewLabel("Search")
-	button.label.Alignment = fyne.TextAlignLeading // Align text to the left
+	button.label.Alignment = fyne.TextAlignLeading
 	button.label.TextStyle = fyne.TextStyle{Bold: true}
 	button.OnTapped = tapped
 	button.Importance = widget.LowImportance
@@ -472,9 +518,9 @@ func (r *customButtonRenderer) Objects() []fyne.CanvasObject {
 
 func (r *customButtonRenderer) Refresh() {
 	if r.button.active {
-		r.background.FillColor = color.NRGBA{R: 212, G: 221, B: 225, A: 255} // Light blue for active
+		r.background.FillColor = color.NRGBA{R: 212, G: 221, B: 225, A: 255}
 	} else {
-		r.background.FillColor = color.NRGBA{R: 136, G: 173, B: 189, A: 255} // Darker blue for inactive
+		r.background.FillColor = color.NRGBA{R: 136, G: 173, B: 189, A: 255}
 	}
 	r.background.Refresh()
 	r.button.icon.Refresh()
@@ -544,12 +590,12 @@ func (r *customTabContainerRenderer) MinSize() fyne.Size {
 	}
 	scanButtonSize := r.container.scanButton.MinSize()
 	width = fyne.Max(width, scanButtonSize.Width)
-	height += scanButtonSize.Height - 5 // Account for overlap
+	height += scanButtonSize.Height - 5
 	return fyne.NewSize(width, height)
 }
 
 func (r *customTabContainerRenderer) Layout(size fyne.Size) {
-	tabHeight := size.Height - 5 // Reduce tab height to make room for overlapping button
+	tabHeight := size.Height - 5
 	tabWidth := size.Width / float32(len(r.container.tabs))
 
 	for i, tab := range r.container.tabs {
@@ -557,12 +603,11 @@ func (r *customTabContainerRenderer) Layout(size fyne.Size) {
 		tab.Move(fyne.NewPos(float32(i)*tabWidth, 0))
 	}
 
-	// Position scan button to overlap slightly with the bottom of the first tab
 	scanButtonSize := fyne.NewSize(100, 22)
 	r.container.scanButton.Resize(scanButtonSize)
 	r.container.scanButton.Move(fyne.NewPos(
-		0,           // Align with the left edge of the first tab
-		tabHeight-5, // Overlap by 5 pixels
+		0,
+		tabHeight-5,
 	))
 }
 
@@ -668,20 +713,21 @@ func (t *customTab) Tapped(*fyne.PointEvent) {
 }
 
 func loadScanIconActive() fyne.Resource {
-	return loadIconResource("assets/scan_icon_active.png")
+	res, err := (&Manager{}).loadImage("scan_icon_active.png")
+	if err != nil {
+		log.Printf("Failed to load scan_icon_active.png: %v", err)
+		return theme.SearchIcon()
+	}
+	return res
 }
 
 func loadScanIconInactive() fyne.Resource {
-	return loadIconResource("assets/scan_icon_inactive.png")
-}
-
-func loadIconResource(path string) fyne.Resource {
-	iconData, err := ioutil.ReadFile(path)
+	res, err := (&Manager{}).loadImage("scan_icon_inactive.png")
 	if err != nil {
-		log.Printf("Failed to load icon: %v", err)
+		log.Printf("Failed to load scan_icon_inactive.png: %v", err)
 		return theme.SearchIcon()
 	}
-	return fyne.NewStaticResource(path, iconData)
+	return res
 }
 
 type habboTheme struct{}
@@ -749,21 +795,10 @@ var resourceVolterGoldfishTtf = loadFontResource("Volter_Goldfish.ttf")
 var resourceVolterGoldfishBoldTtf = loadFontResource("Volter_Goldfish_bold.ttf")
 
 func loadFontResource(filename string) fyne.Resource {
-	fontPaths := []string{
-		"../" + filename,
-		"assets/" + filename,
-		filename,
+	res, err := (&Manager{}).loadImage(filename)
+	if err != nil {
+		log.Printf("Failed to load font %s: %v", filename, err)
+		return theme.DefaultTextFont()
 	}
-
-	for _, path := range fontPaths {
-		data, err := ioutil.ReadFile(path)
-		if err == nil {
-			log.Printf("Successfully loaded font from: %s", path)
-			return fyne.NewStaticResource(filename, data)
-		}
-		log.Printf("Failed to load font from %s: %v", path, err)
-	}
-
-	log.Printf("Failed to load %s, using default bold font", filename)
-	return theme.DefaultTextBoldFont()
+	return res
 }

@@ -16,7 +16,6 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/bolognesandwiches/G-Inventory-Viewer/summary"
 	"xabbo.b7c.io/goearth/shockwave/inventory"
 	"xabbo.b7c.io/goearth/shockwave/room"
 )

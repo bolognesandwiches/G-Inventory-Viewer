@@ -5,11 +5,13 @@ import (
 	"sync"
 	"time"
 
+	"fyne.io/fyne/v2/app"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/common"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/ui"
 	g "xabbo.b7c.io/goearth"
 	"xabbo.b7c.io/goearth/shockwave/inventory"
 	"xabbo.b7c.io/goearth/shockwave/out"
+	"xabbo.b7c.io/goearth/shockwave/profile"
 	"xabbo.b7c.io/goearth/shockwave/room"
 )
 
@@ -30,18 +32,27 @@ var (
 	isCounted      = make(map[int]bool)
 	refreshed      bool
 	retrievedItems = make(map[int]inventory.Item)
+	pickupManager  *common.PickupManager
+	profileManager = profile.NewManager(ext)
 )
 
 func init() {
-	uiManager = ui.NewManager(inventoryMgr, roomMgr, startInventoryCount)
+	pickupManager = common.NewPickupManager(ext, inventoryMgr, nil) // We'll set the callback later in the UI manager
+	SetupPacketLogging(ext)
 }
 
 func startInventoryCount() {
 	lock.Lock()
 	defer lock.Unlock()
 
-	clear(isCounted)
-	clear(retrievedItems)
+	// Clear the maps
+	for k := range isCounted {
+		delete(isCounted, k)
+	}
+	for k := range retrievedItems {
+		delete(retrievedItems, k)
+	}
+
 	refreshed = false
 	isCountingHand = true
 
@@ -85,6 +96,18 @@ func tickCounter() {
 func main() {
 	runtime.LockOSThread()
 
+	fyneApp := app.New()
+
+	uiManager = ui.NewManager(
+		fyneApp,
+		ext,
+		inventoryMgr,
+		roomMgr,
+		pickupManager,
+		startInventoryCount,
+		profileManager,
+	)
+
 	go func() {
 		for range time.Tick(time.Millisecond * 600) {
 			tickCounter()
@@ -92,10 +115,12 @@ func main() {
 	}()
 
 	roomMgr.ObjectsLoaded(func(args room.ObjectsArgs) {
+		pickupManager.UpdateRoomInfo(roomMgr.Objects, roomMgr.Items)
 		go uiManager.UpdateRoomDisplay(roomMgr.Objects, roomMgr.Items)
 	})
 
 	roomMgr.ItemsLoaded(func(args room.ItemsArgs) {
+		pickupManager.UpdateRoomInfo(roomMgr.Objects, roomMgr.Items)
 		go uiManager.UpdateRoomDisplay(roomMgr.Objects, roomMgr.Items)
 	})
 

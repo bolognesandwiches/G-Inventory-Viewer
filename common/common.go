@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -41,9 +42,10 @@ type APIItem struct {
 
 type EnrichedInventoryItem struct {
 	inventory.Item
-	Name    string
-	IconURL string
-	HCValue float64
+	Name     string
+	IconURL  string
+	HCValue  float64
+	GroupKey string
 }
 
 type EnrichedRoomObject struct {
@@ -209,11 +211,17 @@ func LoadAPIItems() error {
 }
 
 func EnrichInventoryItem(item inventory.Item) EnrichedInventoryItem {
+	name := GetItemName(item.Class, string(item.Type), item.Props)
+	groupKey := item.Class
+	if item.Type == "I" {
+		groupKey = fmt.Sprintf("%s_%s", item.Class, item.Props)
+	}
 	return EnrichedInventoryItem{
-		Item:    item,
-		Name:    GetItemName(item.Class, string(item.Type), item.Props),
-		IconURL: GetIconURL(item.Class, string(item.Type), item.Props),
-		HCValue: GetHCValue(GetItemName(item.Class, string(item.Type), item.Props)),
+		Item:     item,
+		Name:     name,
+		IconURL:  GetIconURL(item.Class, string(item.Type), item.Props),
+		HCValue:  GetHCValue(name),
+		GroupKey: groupKey,
 	}
 }
 
@@ -311,4 +319,52 @@ func GetRoomObjectDetails(obj room.Object) string {
 	name := GetItemName(obj.Class, "S", "")
 	return fmt.Sprintf("Name: %s\nID: %d\nClass: %s\nPosition: (%d, %d, %.2f)\nSize: %dx%d\nDirection: %d\n",
 		name, obj.Id, obj.Class, obj.X, obj.Y, obj.Z, obj.Width, obj.Height, obj.Direction)
+}
+
+// Embed represents a Discord embed message
+type Embed struct {
+	Title       string  `json:"title,omitempty"`
+	Description string  `json:"description,omitempty"`
+	Color       int     `json:"color,omitempty"`
+	Fields      []Field `json:"fields,omitempty"`
+}
+
+// Image represents the image structure in a Discord embed message
+type Image struct {
+	URL string `json:"url"`
+}
+
+// Field represents a field in a Discord embed message
+type Field struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Inline bool   `json:"inline"`
+}
+
+// WebhookPayload represents the payload sent to Discord webhook
+type WebhookPayload struct {
+	Embeds []Embed `json:"embeds"`
+}
+
+// SendToDiscord sends a message to the Discord webhook URL
+func SendToDiscord(webhookURL string, embeds []Embed) error {
+	payload := WebhookPayload{
+		Embeds: embeds,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != 204 {
+		return fmt.Errorf("failed to send message to Discord, status code: %d", resp.StatusCode)
+	}
+
+	return nil
 }

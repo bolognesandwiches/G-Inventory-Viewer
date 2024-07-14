@@ -42,6 +42,19 @@ type Manager struct {
 	warnTradeDeclined bool
 	lastTrade         trade.Offers
 	lock              sync.Mutex
+	isTradeOpen       bool
+}
+
+func (m *Manager) IsInTrade(itemId int) bool {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	return m.isInTrade[itemId]
+}
+
+func (m *Manager) IsTradeOpen() bool {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	return m.isTradeOpen
 }
 
 func NewManager(ext *g.Ext, profileMgr *profile.Manager, inventoryMgr *inventory.Manager) *Manager {
@@ -51,6 +64,7 @@ func NewManager(ext *g.Ext, profileMgr *profile.Manager, inventoryMgr *inventory
 		inventoryMgr: inventoryMgr,
 		ext:          ext,
 		isInTrade:    make(map[int]bool),
+		isTradeOpen:  false,
 	}
 
 	mgr.Updated(mgr.handleTradeItems)
@@ -82,6 +96,7 @@ func (m *Manager) handleTradeItems(args trade.Args) {
 	clear(m.isInTrade)
 	m.tradingQty = 0
 	m.warnTradeDeclined = false
+	m.isTradeOpen = true // Set this to true when trade starts
 
 	for i := 0; i < 2; i++ {
 		inv := args.Offers[i]
@@ -115,6 +130,7 @@ func (m *Manager) handleTradeClose(args trade.Args) {
 	m.tradingItem = ""
 	m.tradingItemProps = ""
 	m.targetQty = 0
+	m.isTradeOpen = false // Set this to false when trade ends
 	if m.warnTradeDeclined {
 		m.warnTradeDeclined = false
 		// Notify user about trade cancellation

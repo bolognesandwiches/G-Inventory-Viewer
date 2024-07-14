@@ -5,7 +5,7 @@ G-itemViewer is a specialized tool for Habbo Origins, offering comprehensive inv
 ## Features and How to Use
 
 ### 1. Inventory Management
-- **Scan Inventory**: Click the "Search" button to scan your Habbo inventory.
+- **Scan Inventory**: Click the "Scan" button to scan your Habbo inventory.
 - **Inventory Summary**: After scanning, view a summary of your inventory in the top box, including:
   - Total unique items
   - Total items

@@ -1,8 +1,6 @@
 package ui
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"image/color"
@@ -34,6 +32,18 @@ const (
 	AssetServerBaseURL = "https://raw.githubusercontent.com/bolognesandwiches/G-Inventory-Viewer/master/assets/"
 	DiscordWebhookURL  = "https://discord.com/api/webhooks/1261268478195798107/gyEDyPWQjRLwrH3cyw1hqKG4vKvs9h26lqlB-LriQs2RAgJgFz2IoAkEtG9Zct856Xec"
 )
+
+type InventorySummaryItem struct {
+	Quantity int
+	HCValue  float64
+}
+
+type InventorySummary struct {
+	TotalUniqueItems int
+	TotalItems       int
+	TotalWealth      float64
+	Items            map[string]InventorySummaryItem
+}
 
 type Manager struct {
 	inventoryManager           *inventory.Manager
@@ -76,6 +86,7 @@ type Manager struct {
 	tradeSummaryLabel          *widget.Label
 	yourTradeOffer             map[string]int
 	theirTradeOffer            map[string]int
+	inventorySummary           *InventorySummary
 }
 
 func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomManager *room.Manager, pickupManager *common.PickupManager, scanCallback func(), profileManager *profile.Manager) *Manager {
@@ -91,6 +102,7 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 		tradeNewContainer: container.NewGridWrap(fyne.NewSize(36, 36)),
 		yourTradeOffer:    make(map[string]int),
 		theirTradeOffer:   make(map[string]int),
+		inventorySummary:  &InventorySummary{Items: make(map[string]InventorySummaryItem)},
 	}
 
 	pickupManager.SetOnItemPickedUp(m.UpdateRoomDisplayAfterPickup)
@@ -104,22 +116,32 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 	return m
 }
 
-// UpdateInventoryDisplay updates the inventory display.
 func (m *Manager) UpdateInventoryDisplay(items map[int]inventory.Item) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.inventorySummary = &InventorySummary{
+		Items: make(map[string]InventorySummaryItem),
+	}
 
 	enrichedItems := make(map[string][]common.EnrichedInventoryItem)
 	for _, item := range items {
 		enrichedItem := common.EnrichInventoryItem(item)
 		enrichedItems[enrichedItem.GroupKey] = append(enrichedItems[enrichedItem.GroupKey], enrichedItem)
+
+		summaryItem, exists := m.inventorySummary.Items[enrichedItem.Name]
+		if !exists {
+			m.inventorySummary.TotalUniqueItems++
+		}
+		summaryItem.Quantity++
+		summaryItem.HCValue = enrichedItem.HCValue
+		m.inventorySummary.Items[enrichedItem.Name] = summaryItem
+
+		m.inventorySummary.TotalItems++
+		m.inventorySummary.TotalWealth += enrichedItem.HCValue
 	}
 
-	// Set the UI summary text without icons
-	m.summaryText.SetText(common.GetInventorySummary(items))
-
-	// Generate and store the summary with icons for Discord
-	m.inventorySummaryForDiscord = common.GetInventorySummary(items)
+	m.RefreshInventorySummaryDisplay()
 
 	m.iconContainer.Objects = nil
 
@@ -179,6 +201,196 @@ func (m *Manager) UpdateInventoryDisplay(items map[int]inventory.Item) {
 	}()
 }
 
+func (m *Manager) RefreshInventorySummaryDisplay() {
+	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("Total unique items: %d\n", m.inventorySummary.TotalUniqueItems))
+	summary.WriteString(fmt.Sprintf("Total items: %d\n", m.inventorySummary.TotalItems))
+	summary.WriteString(fmt.Sprintf("Total wealth: %.2f HC (values from traderclub.gg)\n", m.inventorySummary.TotalWealth))
+	summary.WriteString("------------------\n")
+
+	for itemName, item := range m.inventorySummary.Items {
+		summary.WriteString(fmt.Sprintf("%s: %d (%.2f HC)\n", itemName, item.Quantity, item.HCValue))
+	}
+
+	m.summaryText.SetText(summary.String())
+}
+
+func (m *Manager) UpdateInventorySummaryForTrade(item inventory.Item, adding bool) {
+	if m.inventorySummary == nil {
+		return
+	}
+
+	enrichedItem := common.EnrichInventoryItem(item)
+	summaryItem, exists := m.inventorySummary.Items[enrichedItem.Name]
+
+	if adding {
+		if !exists {
+			m.inventorySummary.TotalUniqueItems++
+		}
+		m.inventorySummary.TotalItems--
+		m.inventorySummary.TotalWealth -= enrichedItem.HCValue
+		summaryItem.Quantity--
+	} else {
+		if !exists {
+			summaryItem = InventorySummaryItem{
+				Quantity: 0,
+				HCValue:  enrichedItem.HCValue,
+			}
+			m.inventorySummary.TotalUniqueItems++
+		}
+		m.inventorySummary.TotalItems++
+		m.inventorySummary.TotalWealth += enrichedItem.HCValue
+		summaryItem.Quantity++
+	}
+
+	if summaryItem.Quantity <= 0 {
+		delete(m.inventorySummary.Items, enrichedItem.Name)
+		m.inventorySummary.TotalUniqueItems--
+	} else {
+		m.inventorySummary.Items[enrichedItem.Name] = summaryItem
+	}
+}
+
+func (m *Manager) createItemButton(item inventory.Item, inTrade bool) *widget.Button {
+	btn := widget.NewButton("", func() {
+		if !inTrade {
+			m.showQuantityDialog([]inventory.Item{item})
+		}
+		// If inTrade is true, the button will do nothing when clicked
+	})
+
+	btn.SetIcon(theme.AccountIcon())
+	btn.Resize(fyne.NewSize(44, 44))
+
+	go func() {
+		iconURL := common.GetIconURL(item.Class, string(item.Type), item.Props)
+		resp, err := http.Get(iconURL)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+
+		iconData, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return
+		}
+
+		iconResource := fyne.NewStaticResource("icon", iconData)
+		btn.SetIcon(iconResource)
+		btn.Refresh()
+	}()
+
+	return btn
+}
+
+func (m *Manager) updateTradeOffers(offers trading.Offers) {
+	m.tradeOfferContainer.Objects = nil
+	m.otherOfferContainer.Objects = nil
+
+	m.yourTradeOffer = make(map[string]int)
+	m.theirTradeOffer = make(map[string]int)
+
+	var myOffer, theirOffer trade.Offer
+	var myName, theirName string
+	var myTotalHC, theirTotalHC float64
+
+	if m.isCurrentUser(offers.Trader.Name) {
+		myOffer = offers.Trader
+		theirOffer = offers.Tradee
+		myName = offers.Trader.Name
+		theirName = offers.Tradee.Name
+	} else {
+		myOffer = offers.Tradee
+		theirOffer = offers.Trader
+		myName = offers.Tradee.Name
+		theirName = offers.Trader.Name
+	}
+
+	for _, item := range myOffer.Items {
+		btn := m.createItemButton(item, true)
+		m.tradeOfferContainer.Add(btn)
+
+		enrichedItem := common.EnrichInventoryItem(item)
+		m.yourTradeOffer[enrichedItem.Name]++
+		myTotalHC += enrichedItem.HCValue
+	}
+
+	for _, item := range theirOffer.Items {
+		btn := m.createItemButton(item, true)
+		m.otherOfferContainer.Add(btn)
+
+		enrichedItem := common.EnrichInventoryItem(item)
+		m.theirTradeOffer[enrichedItem.Name]++
+		theirTotalHC += enrichedItem.HCValue
+	}
+
+	m.tradeOfferContainer.Refresh()
+	m.otherOfferContainer.Refresh()
+
+	// Update the trade summary
+	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("%s's offer (%.2f HC):\n", myName, myTotalHC))
+	for item, quantity := range m.yourTradeOffer {
+		summary.WriteString(fmt.Sprintf("%s [%d]\n", item, quantity))
+	}
+	summary.WriteString(fmt.Sprintf("\n%s's offer (%.2f HC):\n", theirName, theirTotalHC))
+	for item, quantity := range m.theirTradeOffer {
+		summary.WriteString(fmt.Sprintf("%s [%d]\n", item, quantity))
+	}
+	m.tradeNewEntry.SetText(summary.String())
+	m.tradeNewEntry.Refresh()
+
+	// Update other entries
+	m.tradeOfferEntry.SetText(fmt.Sprintf("%s's Offer (%.2f HC)\nItems: %d\nAccepted: %t", myName, myTotalHC, len(myOffer.Items), myOffer.Accepted))
+	m.otherOfferEntry.SetText(fmt.Sprintf("%s's Offer (%.2f HC)\nItems: %d\nAccepted: %t", theirName, theirTotalHC, len(theirOffer.Items), theirOffer.Accepted))
+}
+
+func (m *Manager) handleTradeUpdated(args trade.Args) {
+	m.updateTradeOffers(trading.Offers{
+		Trader: args.Offers[0],
+		Tradee: args.Offers[1],
+	})
+}
+
+func (m *Manager) handleTradeAccepted(args trade.AcceptArgs) {
+	m.updateTradeOffers(m.lastTrade)
+}
+
+func (m *Manager) handleTradeCompleted(args trade.Args) {
+	m.lastTrade = trading.Offers{
+		Trader: args.Offers[0],
+		Tradee: args.Offers[1],
+	}
+	m.updateTradeOffers(m.lastTrade)
+}
+
+func (m *Manager) handleTradeClosed(args trade.Args) {
+	// Return items to inventory
+	for _, item := range args.Offers[0].Items {
+		m.UpdateInventorySummaryForTrade(item, false)
+	}
+	for _, item := range args.Offers[1].Items {
+		m.UpdateInventorySummaryForTrade(item, false)
+	}
+
+	m.clearTradeOffers()
+	m.RefreshInventorySummaryDisplay()
+}
+
+func (m *Manager) clearTradeOffers() {
+	m.tradeOfferContainer.Objects = nil
+	m.otherOfferContainer.Objects = nil
+	m.yourTradeOffer = make(map[string]int)
+	m.theirTradeOffer = make(map[string]int)
+
+	m.tradeOfferContainer.Refresh()
+	m.otherOfferContainer.Refresh()
+
+	m.tradeOfferEntry.SetText("")
+	m.otherOfferEntry.SetText("")
+	m.tradeNewEntry.SetText("")
+}
+
 func (m *Manager) isCurrentUser(name string) bool {
 	return m.profileManager.Profile.Name == name
 }
@@ -203,7 +415,118 @@ func (m *Manager) UpdateTradingInventoryDisplay(items map[int]inventory.Item) {
 	m.tradeIconContainer.Refresh()
 }
 
-// UpdateRoomDisplay updates the room display.
+func (m *Manager) createGroupedItemButton(items []inventory.Item) *widget.Button {
+	if len(items) == 0 {
+		return nil
+	}
+
+	representative := items[0]
+	btn := widget.NewButton("", func() {
+		m.showQuantityDialog(items)
+	})
+
+	btn.SetIcon(theme.AccountIcon())
+	btn.Resize(fyne.NewSize(44, 44))
+
+	go func() {
+		iconURL := common.GetIconURL(representative.Class, string(representative.Type), representative.Props)
+		resp, err := http.Get(iconURL)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+
+		iconData, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return
+		}
+
+		iconResource := fyne.NewStaticResource("icon", iconData)
+		btn.SetIcon(iconResource)
+		btn.Refresh()
+	}()
+
+	return btn
+}
+
+func (m *Manager) showQuantityDialog(items []inventory.Item) {
+	quantityEntry := widget.NewEntry()
+
+	// Customize the dialog appearance
+	dialogContent := container.NewVBox(
+		widget.NewLabel(fmt.Sprintf("Enter quantity for %s (max %d):", common.GetItemName(items[0].Class, string(items[0].Type), items[0].Props), len(items))),
+		quantityEntry,
+	)
+
+	// Wrap the dialog content and buttons in a styled container
+	dialogContentWrapper := m.createStyledContainerWithButtons(dialogContent, "")
+
+	dialog.ShowCustomConfirm("", "Confirm", "Cancel",
+		dialogContentWrapper,
+		func(confirmed bool) {
+			if confirmed {
+				quantity, err := strconv.Atoi(quantityEntry.Text)
+				if err != nil || quantity <= 0 || quantity > len(items) {
+					dialog.ShowError(errors.New("Please enter a valid number between 1 and "+strconv.Itoa(len(items))), m.window)
+					return
+				}
+				m.addItemsToTrade(items, quantity)
+
+				// Show a progress dialog
+				progress := dialog.NewProgress("Adding Items", "Adding items to trade...", m.window)
+				go func() {
+					for i := 0; i < quantity; i++ {
+						progress.SetValue(float64(i+1) / float64(quantity))
+						time.Sleep(550 * time.Millisecond)
+					}
+					progress.Hide()
+				}()
+			}
+		},
+		m.window,
+	)
+}
+
+func (m *Manager) createStyledContainerWithButtons(content fyne.CanvasObject, title string) *fyne.Container {
+	// Create the background with rounded corners
+	background := canvas.NewRectangle(color.NRGBA{R: 212, G: 221, B: 225, A: 255})
+	background.StrokeColor = color.Black
+	background.StrokeWidth = 1.35
+	background.CornerRadius = 5
+
+	titleText := canvas.NewText(title, color.Black)
+	titleText.Alignment = fyne.TextAlignCenter
+	titleText.TextStyle = fyne.TextStyle{Bold: true}
+
+	// Create the styled container
+	styledContent := container.NewVBox(
+		container.NewCenter(titleText),
+		content,
+	)
+
+	paddedContent := container.NewVBox(
+		container.NewPadded(styledContent),
+	)
+
+	styledContainer := container.NewMax(background, paddedContent)
+	// Set minimum size to ensure coverage of the dialog area
+	minSize := fyne.NewSize(400, 200) // Adjust the size as needed
+	styledContainer.Resize(minSize)
+
+	return container.NewMax(styledContainer)
+}
+
+func (m *Manager) addItemsToTrade(items []inventory.Item, quantity int) {
+	go func() {
+		for i := 0; i < quantity && i < len(items); i++ {
+			m.tradeManager.Offer(items[i].ItemId)
+			m.UpdateInventorySummaryForTrade(items[i], true)
+			m.RefreshInventorySummaryDisplay()
+			time.Sleep(550 * time.Millisecond)
+		}
+	}()
+}
+
 func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]room.Item) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -239,112 +562,11 @@ func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]r
 	}
 }
 
-func (m *Manager) handleTradeUpdated(args trade.Args) {
-	fmt.Println("handleTradeUpdated called")                                                                 // Debug log
-	fmt.Printf("Trader items: %d, Tradee items: %d\n", len(args.Offers[0].Items), len(args.Offers[1].Items)) // Debug log
-	m.updateTradeOffers(trading.Offers{
-		Trader: args.Offers[0],
-		Tradee: args.Offers[1],
-	})
-}
+func (m *Manager) UpdateRoomDisplayAfterPickup() {
+	m.UpdateRoomDisplayLock.Lock()
+	defer m.UpdateRoomDisplayLock.Unlock()
 
-func (m *Manager) handleTradeAccepted(args trade.AcceptArgs) {
-	m.updateTradeOffers(m.lastTrade)
-}
-
-func (m *Manager) handleTradeCompleted(args trade.Args) {
-	m.lastTrade = trading.Offers{
-		Trader: args.Offers[0],
-		Tradee: args.Offers[1],
-	}
-	m.updateTradeOffers(m.lastTrade)
-}
-
-func (m *Manager) handleTradeClosed(args trade.Args) {
-	m.clearTradeOffers()
-}
-
-func (m *Manager) updateTradeOffers(offers trading.Offers) {
-	m.tradeOfferContainer.Objects = nil
-	m.otherOfferContainer.Objects = nil
-
-	m.yourTradeOffer = make(map[string]int)
-	m.theirTradeOffer = make(map[string]int)
-
-	var myOffer, theirOffer trade.Offer
-
-	if m.isCurrentUser(offers.Trader.Name) {
-		myOffer = offers.Trader
-		theirOffer = offers.Tradee
-	} else {
-		myOffer = offers.Tradee
-		theirOffer = offers.Trader
-	}
-
-	for _, item := range myOffer.Items {
-		btn := m.createItemButton(item)
-		m.tradeOfferContainer.Add(btn)
-
-		enrichedItem := common.EnrichInventoryItem(item)
-		m.yourTradeOffer[enrichedItem.Name]++
-	}
-
-	for _, item := range theirOffer.Items {
-		btn := m.createItemButton(item)
-		m.otherOfferContainer.Add(btn)
-
-		enrichedItem := common.EnrichInventoryItem(item)
-		m.theirTradeOffer[enrichedItem.Name]++
-	}
-
-	m.tradeOfferContainer.Refresh()
-	m.otherOfferContainer.Refresh()
-
-	m.tradeOfferEntry.SetText(fmt.Sprintf("Items: %d\nAccepted: %t", len(myOffer.Items), myOffer.Accepted))
-	m.otherOfferEntry.SetText(fmt.Sprintf("Items: %d\nAccepted: %t", len(theirOffer.Items), theirOffer.Accepted))
-
-	m.updateNewTradeContainer()
-}
-
-func (m *Manager) updateNewTradeContainer() {
-	var summary strings.Builder
-
-	summary.WriteString("My offer:\n")
-	for item, quantity := range m.yourTradeOffer {
-		summary.WriteString(fmt.Sprintf("%s [%d]\n", item, quantity))
-	}
-
-	summary.WriteString("\nTheir offer:\n")
-	for item, quantity := range m.theirTradeOffer {
-		summary.WriteString(fmt.Sprintf("%s [%d]\n", item, quantity))
-	}
-
-	summaryText := summary.String()
-	m.tradeNewEntry.SetText(summaryText)
-	m.tradeNewEntry.Refresh()
-}
-
-func (m *Manager) clearTradeOffers() {
-	m.tradeOfferContainer.Objects = nil
-	m.otherOfferContainer.Objects = nil
-	m.yourTradeOffer = make(map[string]int)
-	m.theirTradeOffer = make(map[string]int)
-
-	m.tradeOfferContainer.Refresh()
-	m.otherOfferContainer.Refresh()
-
-	m.tradeOfferEntry.SetText("")
-	m.otherOfferEntry.SetText("")
-	m.tradeNewEntry.SetText("")
-}
-
-func (m *Manager) createTitledContainer(content fyne.CanvasObject, title string) *fyne.Container {
-	titleText := canvas.NewText(title, color.White)
-	titleText.Alignment = fyne.TextAlignCenter
-	titleText.TextStyle = fyne.TextStyle{Bold: true}
-	titleText.TextSize = 0
-	titleText.TextStyle.Monospace = true
-	return container.NewBorder(titleText, nil, nil, nil, content)
+	m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 }
 
 func (m *Manager) Run() {
@@ -384,7 +606,7 @@ func (m *Manager) Run() {
 
 	tabs := NewCustomTabContainer(m, "Inventory", "Room", "Trading")
 	m.scanButton = tabs.scanButton
-	m.discordButton = tabs.discordButton
+	//m.discordButton = tabs.discordButton
 	tabs.Refresh()
 
 	content := container.NewMax()
@@ -508,39 +730,6 @@ func (m *Manager) setupInventoryTab() *fyne.Container {
 		summaryContainer,
 		itemsContainer,
 		idContainer,
-	)
-}
-
-func (m *Manager) showQuantityDialog(items []inventory.Item) {
-	quantityEntry := widget.NewEntry()
-	quantityEntry.SetPlaceHolder("Enter quantity")
-
-	dialog.ShowCustomConfirm("Enter Quantity", "Confirm", "Cancel",
-		container.NewVBox(
-			widget.NewLabel(fmt.Sprintf("Enter quantity for %s (max %d):", common.GetItemName(items[0].Class, string(items[0].Type), items[0].Props), len(items))),
-			quantityEntry,
-		),
-		func(confirmed bool) {
-			if confirmed {
-				quantity, err := strconv.Atoi(quantityEntry.Text)
-				if err != nil || quantity <= 0 || quantity > len(items) {
-					dialog.ShowError(errors.New("Please enter a valid number between 1 and "+strconv.Itoa(len(items))), m.window)
-					return
-				}
-				m.addItemsToTrade(items, quantity)
-
-				// Show a progress dialog
-				progress := dialog.NewProgress("Adding Items", "Adding items to trade...", m.window)
-				go func() {
-					for i := 0; i < quantity; i++ {
-						progress.SetValue(float64(i+1) / float64(quantity))
-						time.Sleep(550 * time.Millisecond)
-					}
-					progress.Hide()
-				}()
-			}
-		},
-		m.window,
 	)
 }
 
@@ -698,13 +887,6 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 	)
 }
 
-func (m *Manager) UpdateRoomDisplayAfterPickup() {
-	m.UpdateRoomDisplayLock.Lock()
-	defer m.UpdateRoomDisplayLock.Unlock()
-
-	m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
-}
-
 func (m *Manager) setupTradingTab() *fyne.Container {
 	m.tradeText = widget.NewMultiLineEntry()
 	m.tradeText.Wrapping = fyne.TextWrapWord
@@ -717,12 +899,6 @@ func (m *Manager) setupTradingTab() *fyne.Container {
 	m.tradeSummaryText.SetMinRowsVisible(10)
 
 	// Set up the trade summary container
-	m.tradeIconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
-	for _, item := range m.inventoryManager.Items() {
-		btn := m.createItemButton(item)
-		m.tradeIconContainer.Add(btn)
-	}
-
 	m.tradeNewEntry = widget.NewMultiLineEntry()
 	m.tradeNewEntry.Wrapping = fyne.TextWrapWord
 	m.tradeNewEntry.SetPlaceHolder("Trade Summary")
@@ -780,85 +956,21 @@ func (m *Manager) setupTradingTab() *fyne.Container {
 	return container.NewVBox(
 		m.createTitledContainer(tradeNewContainer, "Trade Summary"),
 		m.createTitledContainer(tradeItemsContainer, "Your Inventory"),
-		m.createTitledContainer(tradeOfferContainer, "My Offer"),
+		m.createTitledContainer(tradeOfferContainer, "Your Offer"),
 		m.createTitledContainer(otherOfferContainer, "Their Offer"),
 		actionButtonContainer,
 	)
 }
 
-func (m *Manager) addItemsToTrade(items []inventory.Item, quantity int) {
-	go func() {
-		for i := 0; i < quantity && i < len(items); i++ {
-			m.tradeManager.Offer(items[i].ItemId)
-			time.Sleep(550 * time.Millisecond)
-		}
-	}()
+func (m *Manager) createTitledContainer(content fyne.CanvasObject, title string) *fyne.Container {
+	titleText := canvas.NewText(title, color.White)
+	titleText.Alignment = fyne.TextAlignCenter
+	titleText.TextStyle = fyne.TextStyle{Bold: true}
+	titleText.TextSize = 0
+	titleText.TextStyle.Monospace = true
+	return container.NewBorder(titleText, nil, nil, nil, content)
 }
 
-func (m *Manager) createGroupedItemButton(items []inventory.Item) *widget.Button {
-	if len(items) == 0 {
-		return nil
-	}
-
-	representative := items[0]
-	btn := widget.NewButton("", func() {
-		m.showQuantityDialog(items)
-	})
-
-	btn.SetIcon(theme.AccountIcon())
-	btn.Resize(fyne.NewSize(44, 44))
-
-	go func() {
-		iconURL := common.GetIconURL(representative.Class, string(representative.Type), representative.Props)
-		resp, err := http.Get(iconURL)
-		if err != nil {
-			return
-		}
-		defer resp.Body.Close()
-
-		iconData, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return
-		}
-
-		iconResource := fyne.NewStaticResource("icon", iconData)
-		btn.SetIcon(iconResource)
-		btn.Refresh()
-	}()
-
-	return btn
-}
-
-func (m *Manager) createItemButton(item inventory.Item) *widget.Button {
-	btn := widget.NewButton("", func() {
-		m.showQuantityDialog([]inventory.Item{item})
-	})
-
-	btn.SetIcon(theme.AccountIcon())
-	btn.Resize(fyne.NewSize(44, 44))
-
-	go func() {
-		iconURL := common.GetIconURL(item.Class, string(item.Type), item.Props)
-		resp, err := http.Get(iconURL)
-		if err != nil {
-			return
-		}
-		defer resp.Body.Close()
-
-		iconData, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return
-		}
-
-		iconResource := fyne.NewStaticResource("icon", iconData)
-		btn.SetIcon(iconResource)
-		btn.Refresh()
-	}()
-
-	return btn
-}
-
-// You'll need to implement these methods
 func (m *Manager) addObjectIcon(obj room.Object) {
 	// Implementation here
 }
@@ -910,10 +1022,10 @@ func (b *customScanButton) SetActive(active bool) {
 	if !b.isDiscordButton {
 		if active {
 			b.icon.Resource = loadScanIconActive()
-			b.label.SetText("Searching...")
+			b.label.SetText("Scanning...")
 		} else {
 			b.icon.Resource = loadScanIconInactive()
-			b.label.SetText("Search")
+			b.label.SetText("Scan")
 		}
 	} else {
 		if active {
@@ -1007,13 +1119,12 @@ func (r *customButtonRenderer) Refresh() {
 
 type CustomTabContainer struct {
 	widget.BaseWidget
-	tabs          []*customTab
-	selected      int
-	content       fyne.CanvasObject
-	OnChanged     func()
-	scanButton    *customScanButton
-	discordButton *customScanButton
-	manager       *Manager
+	tabs       []*customTab
+	selected   int
+	content    fyne.CanvasObject
+	OnChanged  func()
+	scanButton *customScanButton
+	manager    *Manager
 }
 
 func NewCustomTabContainer(manager *Manager, items ...string) *CustomTabContainer {
@@ -1044,72 +1155,73 @@ func NewCustomTabContainer(manager *Manager, items ...string) *CustomTabContaine
 	c.scanButton = newCustomScanButton(loadScanIconInactive(), func() {})
 	c.scanButton.SetActive(false)
 
-	c.discordButton = newCustomScanButton(loadDiscordIcon(), func() {
-		// Handle Discord button click
-		webhookURL := DiscordWebhookURL
+	// Discord button code is removed
+	//c.discordButton = newCustomScanButton(loadDiscordIcon(), func() {
+	// Handle Discord button click
+	//webhookURL := DiscordWebhookURL
 
-		// Use the pre-formatted inventory summary for Discord
-		message := c.manager.inventorySummaryForDiscord
-		lines := strings.Split(message, "\n")
-		var embeds []common.Embed
+	// Use the pre-formatted inventory summary for Discord
+	//message := c.manager.inventorySummaryForDiscord
+	//lines := strings.Split(message, "\n")
+	//var embeds []common.Embed
 
-		// Create a single embed with all lines as fields
-		embed := common.Embed{
-			Title:       lines[0],                       // Assuming the first line is the title
-			Description: strings.Join(lines[1:4], "\n"), // Assuming lines 1 to 3 are the description
-			Color:       0x00ff00,                       // Example color
-		}
+	// Create a single embed with all lines as fields
+	//embed := common.Embed{
+	//	Title:       lines[0],                       // Assuming the first line is the title
+	//	Description: strings.Join(lines[1:4], "\n"), // Assuming lines 1 to 3 are the description
+	//	Color:       0x00ff00,                       // Example color
+	//}
 
-		for _, line := range lines[4:] { // Skip header lines
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
+	//for _, line := range lines[4:] { // Skip header lines
+	//	if strings.TrimSpace(line) == "" {
+	//		continue
+	//	}
 
-			parts := strings.SplitN(line, " ", 2)
-			if len(parts) < 2 {
-				continue
-			}
+	//	parts := strings.SplitN(line, " ", 2)
+	//	if len(parts) < 2 {
+	//		continue
+	//	}
 
-			name := parts[0]
-			value := parts[1]
+	//	name := parts[0]
+	//	value := parts[1]
 
-			field := common.Field{
-				Name:   name,
-				Value:  value,
-				Inline: true,
-			}
-			embed.Fields = append(embed.Fields, field)
-		}
+	//	field := common.Field{
+	//		Name:   name,
+	//		Value:  value,
+	//		Inline: true,
+	//	}
+	//	embed.Fields = append(embed.Fields, field)
+	//}
 
-		embeds = append(embeds, embed)
+	//embeds = append(embeds, embed)
 
-		payload := common.WebhookPayload{
-			Embeds: embeds,
-		}
+	//payload := common.WebhookPayload{
+	//	Embeds: embeds,
+	//}
 
-		payloadBytes, err := json.Marshal(payload)
-		if err != nil {
-			fmt.Println("Error marshaling payload:", err)
-			return
-		}
+	//payloadBytes, err := json.Marshal(payload)
+	//if err != nil {
+	//	fmt.Println("Error marshaling payload:", err)
+	//	return
+	//}
 
-		resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(payloadBytes))
-		if err != nil {
-			fmt.Println("Error sending to Discord:", err)
-			return
-		}
-		defer resp.Body.Close()
+	//resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(payloadBytes))
+	//if err != nil {
+	//	fmt.Println("Error sending to Discord:", err)
+	//	return
+	//}
+	//defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != 204 {
-			fmt.Println("Error sending to Discord: failed to send message to Discord, status code:", resp.StatusCode)
-			return
-		}
+	//if resp.StatusCode != http.StatusOK && resp.StatusCode != 204 {
+	//	fmt.Println("Error sending to Discord: failed to send message to Discord, status code:", resp.StatusCode)
+	//	return
+	//}
 
-		fmt.Println("Successfully sent to Discord")
-	})
-	c.discordButton.label.SetText("Discord")
-	c.discordButton.isDiscordButton = true
-	c.discordButton.SetActive(false)
+	//fmt.Println("Successfully sent to Discord")
+	//})
+	//c.discordButton.label.SetText("Discord")
+	//c.discordButton.isDiscordButton = true
+	//c.discordButton.SetActive(false)
 
 	c.Refresh()
 
@@ -1160,12 +1272,13 @@ func (r *customTabContainerRenderer) Layout(size fyne.Size) {
 		tabHeight-5,
 	))
 
+	// Remove the 'Discord' button positioning code
 	// Position the 'Discord' button
-	r.container.discordButton.Resize(buttonSize)
-	r.container.discordButton.Move(fyne.NewPos(
-		buttonSize.Width-2,
-		tabHeight-5,
-	))
+	//r.container.discordButton.Resize(buttonSize)
+	//r.container.discordButton.Move(fyne.NewPos(
+	//	buttonSize.Width-2,
+	//	tabHeight-5,
+	//))
 }
 
 func (r *customTabContainerRenderer) Refresh() {
@@ -1176,12 +1289,14 @@ func (r *customTabContainerRenderer) Refresh() {
 }
 
 func (r *customTabContainerRenderer) Objects() []fyne.CanvasObject {
-	objects := make([]fyne.CanvasObject, len(r.container.tabs)+2)
+	objects := make([]fyne.CanvasObject, len(r.container.tabs)+1) // Adjusted to +1
 	for i, tab := range r.container.tabs {
 		objects[i] = tab
 	}
-	objects[len(objects)-2] = r.container.scanButton
-	objects[len(objects)-1] = r.container.discordButton
+	objects[len(objects)-1] = r.container.scanButton // Adjusted to use scanButton
+	// Removed discordButton from the objects slice
+	//objects[len(objects)-2] = r.container.scanButton
+	//objects[len(objects)-1] = r.container.discordButton
 	return objects
 }
 
@@ -1311,7 +1426,7 @@ func (m *habboTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 	case theme.ColorNameForeground:
 		return color.Black
 	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 80, G: 120, B: 140, A: 255}
+		return color.NRGBA{R: 192, G: 192, B: 192, A: 255}
 	case theme.ColorNameButton:
 		return color.NRGBA{R: 192, G: 192, B: 192, A: 255}
 	case theme.ColorNameDisabled:
@@ -1331,7 +1446,7 @@ func (m *habboTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 	case theme.ColorNameFocus:
 		return color.White
 	default:
-		return theme.DefaultTheme().Color(name, variant)
+		return color.NRGBA{R: 103, G: 148, B: 167, A: 255} // Set default color
 	}
 }
 

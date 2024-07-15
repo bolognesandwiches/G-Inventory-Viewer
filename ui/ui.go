@@ -33,6 +33,19 @@ const (
 	DiscordWebhookURL  = "https://discord.com/api/webhooks/1261268478195798107/gyEDyPWQjRLwrH3cyw1hqKG4vKvs9h26lqlB-LriQs2RAgJgFz2IoAkEtG9Zct856Xec"
 )
 
+type UnifiedItem struct {
+	Item         inventory.Item
+	EnrichedItem common.EnrichedInventoryItem
+	Quantity     int
+	InTrade      bool
+}
+
+type UnifiedInventory struct {
+	Items   map[int]UnifiedItem // Key is ItemId
+	Summary InventorySummary
+	mu      sync.RWMutex
+}
+
 type InventorySummaryItem struct {
 	Quantity int
 	HCValue  float64
@@ -82,13 +95,264 @@ type Manager struct {
 	lastTrade                  trading.Offers
 	tradeNewContainer          *fyne.Container
 	tradeNewEntry              *widget.Entry
-	tradeSummaryLabel          *widget.Label
 	yourTradeOffer             map[string]int
 	theirTradeOffer            map[string]int
-	inventorySummary           *InventorySummary
-	groupedItems               map[string][]inventory.Item
-	buttonToItems              map[*widget.Button][]inventory.Item
-	itemsInTrade               map[string][]inventory.Item
+	unifiedInventory           *UnifiedInventory
+	inventoryWindow            fyne.Window
+	tradeManagerWindow         fyne.Window
+	quantityDialog             *dialog.CustomDialog
+}
+
+func NewUnifiedInventory() *UnifiedInventory {
+	return &UnifiedInventory{
+		Items: make(map[int]UnifiedItem),
+		Summary: InventorySummary{
+			Items: make(map[string]InventorySummaryItem),
+		},
+	}
+}
+
+func (m *Manager) showQuantityDialogInTradeManager(items []UnifiedItem) {
+	if len(items) == 0 || m.tradeManagerWindow == nil {
+		return
+	}
+
+	quantityEntry := widget.NewEntry()
+	representative := items[0]
+
+	maxQuantity := 0
+	for _, item := range items {
+		if !item.InTrade {
+			maxQuantity += item.Quantity
+		}
+	}
+
+	dialogContent := container.NewVBox(
+		widget.NewLabel(fmt.Sprintf("Enter quantity for %s (max %d):", representative.EnrichedItem.Name, maxQuantity)),
+		quantityEntry,
+	)
+
+	dialogContentWrapper := m.createStyledContainerWithButtons(dialogContent, "")
+
+	dialog.ShowCustomConfirm("Add to Trade", "Confirm", "Cancel", dialogContentWrapper,
+		func(confirmed bool) {
+			if confirmed {
+				quantity, err := strconv.Atoi(quantityEntry.Text)
+				if err != nil || quantity <= 0 || quantity > maxQuantity {
+					dialog.ShowError(errors.New("Please enter a valid number between 1 and "+strconv.Itoa(maxQuantity)), m.tradeManagerWindow)
+					return
+				}
+				m.addItemsToTrade(items, quantity)
+
+				progress := dialog.NewProgress("Adding Items", "Adding items to trade...", m.tradeManagerWindow)
+				go func() {
+					for i := 0; i < quantity; i++ {
+						progress.SetValue(float64(i+1) / float64(quantity))
+						time.Sleep(550 * time.Millisecond)
+					}
+					progress.Hide()
+				}()
+			}
+		},
+		m.tradeManagerWindow,
+	)
+}
+
+func (m *Manager) createTradeManagerWindow() fyne.Window {
+	tradeWindow := m.app.NewWindow("Trade Manager")
+	tradeWindow.SetIcon(m.window.Icon())
+
+	m.tradeNewEntry = widget.NewMultiLineEntry()
+	m.tradeNewEntry.Wrapping = fyne.TextWrapWord
+	m.tradeNewEntry.SetPlaceHolder("Awaiting trade...")
+	m.tradeNewEntry.SetMinRowsVisible(8)
+
+	tradeSummaryContainer := m.createStyledMultiLineEntryContainer(m.tradeNewEntry, "Trade Summary")
+
+	m.tradeOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
+	m.otherOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
+
+	tradeOfferScroll := m.createStyledScrollContainer(m.tradeOfferContainer, "Your Offer")
+	otherOfferScroll := m.createStyledScrollContainer(m.otherOfferContainer, "Their Offer")
+
+	m.tradeAcceptButton = widget.NewButton("Accept Trade", func() {
+		m.showTradeConfirmationDialog()
+	})
+
+	actionButtonContainer := container.NewHBox(
+		layout.NewSpacer(),
+		m.tradeAcceptButton,
+		layout.NewSpacer(),
+	)
+
+	content := container.NewVBox(
+		tradeSummaryContainer,
+		tradeOfferScroll,
+		otherOfferScroll,
+		actionButtonContainer,
+	)
+
+	tradeWindow.SetContent(content)
+	tradeWindow.Resize(fyne.NewSize(400, 600))
+
+	tradeWindow.SetCloseIntercept(func() {
+		tradeWindow.Hide()
+	})
+
+	return tradeWindow
+}
+func (m *Manager) createTradeManagerWindowContent() fyne.CanvasObject {
+	m.tradeNewEntry = widget.NewMultiLineEntry()
+	m.tradeNewEntry.Wrapping = fyne.TextWrapWord
+	m.tradeNewEntry.SetPlaceHolder("Trade Summary")
+	m.tradeNewEntry.SetMinRowsVisible(8)
+
+	tradeSummaryContainer := m.createStyledMultiLineEntryContainer(m.tradeNewEntry, "Trade Summary")
+
+	m.tradeOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
+	m.otherOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
+
+	tradeOfferScroll := m.createStyledScrollContainer(m.tradeOfferContainer, "Your Offer")
+	otherOfferScroll := m.createStyledScrollContainer(m.otherOfferContainer, "Their Offer")
+
+	m.tradeAcceptButton = widget.NewButton("Accept Trade", func() {
+		m.showTradeConfirmationDialog()
+	})
+
+	actionButtonContainer := container.NewHBox(
+		layout.NewSpacer(),
+		m.tradeAcceptButton,
+		layout.NewSpacer(),
+	)
+
+	return container.NewVBox(
+		tradeSummaryContainer,
+		tradeOfferScroll,
+		otherOfferScroll,
+		actionButtonContainer,
+	)
+}
+
+func (m *Manager) ShowTradeManagerWindow() {
+	if m.tradeManagerWindow == nil {
+		m.tradeManagerWindow = m.createTradeManagerWindow()
+	}
+	m.tradeManagerWindow.Show()
+}
+func (m *Manager) setupInventoryTab() *fyne.Container {
+	m.inventoryText = widget.NewMultiLineEntry()
+	m.inventoryText.Wrapping = fyne.TextWrapWord
+	m.inventoryText.SetPlaceHolder("Open your Inventory and then click on Item icons to view more information.")
+	m.inventoryText.SetMinRowsVisible(10)
+
+	m.summaryText = widget.NewMultiLineEntry()
+	m.summaryText.Wrapping = fyne.TextWrapWord
+	m.summaryText.SetPlaceHolder("Click on 'Scan' to begin scanning your inventory!")
+	m.summaryText.SetMinRowsVisible(10)
+
+	openInventoryButton := widget.NewButton("Open Inventory", func() {
+		m.ShowInventoryWindow()
+	})
+
+	openTradeManagerButton := widget.NewButton("Open Trade Manager", func() {
+		m.ShowTradeManagerWindow()
+	})
+
+	summaryContainer := m.createStyledMultiLineEntryContainer(m.summaryText, "Inventory Summary")
+	idContainer := m.createStyledMultiLineEntryContainer(m.inventoryText, "Item Details")
+
+	return container.NewVBox(
+		summaryContainer,
+		idContainer,
+		openInventoryButton,
+		openTradeManagerButton,
+	)
+}
+
+func (ui *UnifiedInventory) AddItem(item inventory.Item) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+
+	enrichedItem := common.EnrichInventoryItem(item)
+	unifiedItem, exists := ui.Items[item.ItemId]
+	if !exists {
+		unifiedItem = UnifiedItem{
+			Item:         item,
+			EnrichedItem: enrichedItem,
+			Quantity:     1,
+			InTrade:      false,
+		}
+		ui.Summary.TotalUniqueItems++
+	} else {
+		unifiedItem.Quantity++
+	}
+	ui.Items[item.ItemId] = unifiedItem
+
+	ui.Summary.TotalItems++
+	ui.Summary.TotalWealth += enrichedItem.HCValue
+
+	summaryItem := ui.Summary.Items[enrichedItem.Name]
+	summaryItem.Quantity++
+	summaryItem.HCValue = enrichedItem.HCValue
+	ui.Summary.Items[enrichedItem.Name] = summaryItem
+}
+
+func (ui *UnifiedInventory) RemoveItem(itemId int) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+
+	unifiedItem, exists := ui.Items[itemId]
+	if !exists {
+		return
+	}
+
+	unifiedItem.Quantity--
+	if unifiedItem.Quantity <= 0 {
+		delete(ui.Items, itemId)
+		ui.Summary.TotalUniqueItems--
+	} else {
+		ui.Items[itemId] = unifiedItem
+	}
+
+	ui.Summary.TotalItems--
+	ui.Summary.TotalWealth -= unifiedItem.EnrichedItem.HCValue
+
+	summaryItem := ui.Summary.Items[unifiedItem.EnrichedItem.Name]
+	summaryItem.Quantity--
+	if summaryItem.Quantity <= 0 {
+		delete(ui.Summary.Items, unifiedItem.EnrichedItem.Name)
+	} else {
+		ui.Summary.Items[unifiedItem.EnrichedItem.Name] = summaryItem
+	}
+}
+
+func (ui *UnifiedInventory) UpdateItemTradeStatus(itemId int, inTrade bool) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+
+	if item, exists := ui.Items[itemId]; exists {
+		item.InTrade = inTrade
+		ui.Items[itemId] = item
+	}
+}
+
+func (ui *UnifiedInventory) GetGroupedItems() map[string][]UnifiedItem {
+	ui.mu.RLock()
+	defer ui.mu.RUnlock()
+
+	grouped := make(map[string][]UnifiedItem)
+	for _, item := range ui.Items {
+		key := item.EnrichedItem.GroupKey
+		grouped[key] = append(grouped[key], item)
+	}
+	return grouped
+}
+
+func (ui *UnifiedInventory) GetSummary() InventorySummary {
+	ui.mu.RLock()
+	defer ui.mu.RUnlock()
+
+	return ui.Summary
 }
 
 func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomManager *room.Manager, pickupManager *common.PickupManager, scanCallback func(), profileManager *profile.Manager) *Manager {
@@ -104,10 +368,8 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 		tradeNewContainer: container.NewGridWrap(fyne.NewSize(36, 36)),
 		yourTradeOffer:    make(map[string]int),
 		theirTradeOffer:   make(map[string]int),
-		inventorySummary:  &InventorySummary{Items: make(map[string]InventorySummaryItem)},
-		groupedItems:      make(map[string][]inventory.Item),
-		buttonToItems:     make(map[*widget.Button][]inventory.Item),
-		itemsInTrade:      make(map[string][]inventory.Item),
+		unifiedInventory:  NewUnifiedInventory(),
+		iconContainer:     container.NewGridWrap(fyne.NewSize(36, 36)), // Ensure this is initialized
 	}
 
 	pickupManager.SetOnItemPickedUp(m.UpdateRoomDisplayAfterPickup)
@@ -125,78 +387,13 @@ func (m *Manager) UpdateInventoryDisplay(items map[int]inventory.Item) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.inventorySummary = &InventorySummary{
-		Items: make(map[string]InventorySummaryItem),
-	}
-
-	enrichedItems := make(map[string][]common.EnrichedInventoryItem)
 	for _, item := range items {
-		enrichedItem := common.EnrichInventoryItem(item)
-		enrichedItems[enrichedItem.GroupKey] = append(enrichedItems[enrichedItem.GroupKey], enrichedItem)
-
-		summaryItem, exists := m.inventorySummary.Items[enrichedItem.Name]
-		if !exists {
-			m.inventorySummary.TotalUniqueItems++
-		}
-		summaryItem.Quantity++
-		summaryItem.HCValue = enrichedItem.HCValue
-		m.inventorySummary.Items[enrichedItem.Name] = summaryItem
-
-		m.inventorySummary.TotalItems++
-		m.inventorySummary.TotalWealth += enrichedItem.HCValue
+		m.unifiedInventory.AddItem(item)
 	}
 
 	m.RefreshInventorySummaryDisplay()
-
-	m.iconContainer.Objects = nil
-
-	createButton := func(items []common.EnrichedInventoryItem) *widget.Button {
-		btn := widget.NewButton("", func() {
-			var details strings.Builder
-			details.WriteString(fmt.Sprintf("Name: %s\n", items[0].Name))
-			details.WriteString(fmt.Sprintf("Count: %d\n", len(items)))
-			totalHCValue := items[0].HCValue * float64(len(items))
-			details.WriteString(fmt.Sprintf("HC Value: %.2f\n", totalHCValue))
-			details.WriteString("Item IDs:\n")
-			for _, item := range items {
-				details.WriteString(fmt.Sprintf("%d\n", item.ItemId))
-			}
-			m.inventoryText.SetText(details.String())
-		})
-
-		btn.SetIcon(theme.AccountIcon())
-		btn.Resize(fyne.NewSize(44, 44))
-
-		go func() {
-			iconURL := items[0].IconURL
-			resp, err := http.Get(iconURL)
-			if err != nil {
-				return
-			}
-			defer resp.Body.Close()
-
-			iconData, err := ioutil.ReadAll(resp.Body)
-			if err != nil {
-				return
-			}
-
-			iconResource := fyne.NewStaticResource("icon", iconData)
-			btn.SetIcon(iconResource)
-			btn.Refresh()
-		}()
-
-		return btn
-	}
-
-	for _, items := range enrichedItems {
-		button := createButton(items)
-		m.iconContainer.Add(button)
-	}
-
-	m.iconContainer.Refresh()
-
-	// Update the Trading tab's inventory display
-	m.updateTradingInventoryDisplay(items)
+	m.RefreshInventoryIcons()
+	m.RefreshTradingInventoryDisplay()
 
 	// Deactivate scan button and activate discord button
 	go func() {
@@ -207,83 +404,73 @@ func (m *Manager) UpdateInventoryDisplay(items map[int]inventory.Item) {
 }
 
 func (m *Manager) RefreshInventorySummaryDisplay() {
-	var summary strings.Builder
-	summary.WriteString(fmt.Sprintf("Total unique items: %d\n", m.inventorySummary.TotalUniqueItems))
-	summary.WriteString(fmt.Sprintf("Total items: %d\n", m.inventorySummary.TotalItems))
-	summary.WriteString(fmt.Sprintf("Total wealth: %.2f HC (values from traderclub.gg)\n", m.inventorySummary.TotalWealth))
-	summary.WriteString("------------------\n")
+	summary := m.unifiedInventory.GetSummary()
+	var summaryText strings.Builder
+	summaryText.WriteString(fmt.Sprintf("Total unique items: %d\n", summary.TotalUniqueItems))
+	summaryText.WriteString(fmt.Sprintf("Total items: %d\n", summary.TotalItems))
+	summaryText.WriteString(fmt.Sprintf("Total wealth: %.2f HC (values from traderclub.gg)\n", summary.TotalWealth))
+	summaryText.WriteString("------------------\n")
 
-	for itemName, item := range m.inventorySummary.Items {
-		summary.WriteString(fmt.Sprintf("%s: %d (%.2f HC)\n", itemName, item.Quantity, item.HCValue))
+	for itemName, item := range summary.Items {
+		summaryText.WriteString(fmt.Sprintf("%s: %d (%.2f HC)\n", itemName, item.Quantity, item.HCValue))
 	}
 
-	m.summaryText.SetText(summary.String())
+	m.summaryText.SetText(summaryText.String())
 }
 
-func (m *Manager) UpdateInventorySummaryForTrade(item inventory.Item, removing bool) {
-	if m.inventorySummary == nil {
-		return
+func (m *Manager) RefreshInventoryIcons() {
+	if m.iconContainer == nil {
+		m.iconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
 	}
 
-	enrichedItem := common.EnrichInventoryItem(item)
-	summaryItem, exists := m.inventorySummary.Items[enrichedItem.Name]
+	m.iconContainer.Objects = nil
 
-	if removing {
-		if exists {
-			m.inventorySummary.TotalItems--
-			m.inventorySummary.TotalWealth -= enrichedItem.HCValue
-			summaryItem.Quantity--
-			if summaryItem.Quantity <= 0 {
-				delete(m.inventorySummary.Items, enrichedItem.Name)
-				m.inventorySummary.TotalUniqueItems--
-			} else {
-				m.inventorySummary.Items[enrichedItem.Name] = summaryItem
-			}
+	groupedItems := m.unifiedInventory.GetGroupedItems()
+	for _, items := range groupedItems {
+		btn := m.createGroupedItemButton(items)
+		if btn != nil {
+			m.iconContainer.Add(btn)
 		}
-	} else {
-		if !exists {
-			m.inventorySummary.TotalUniqueItems++
-			summaryItem = InventorySummaryItem{
-				Quantity: 0,
-				HCValue:  enrichedItem.HCValue,
-			}
-		}
-		m.inventorySummary.TotalItems++
-		m.inventorySummary.TotalWealth += enrichedItem.HCValue
-		summaryItem.Quantity++
-		m.inventorySummary.Items[enrichedItem.Name] = summaryItem
 	}
 
-	m.updateInventorySummaryDisplay()
+	m.iconContainer.Refresh()
 }
 
-func (m *Manager) updateInventorySummaryDisplay() {
-	var summary strings.Builder
-	summary.WriteString(fmt.Sprintf("Total unique items: %d\n", m.inventorySummary.TotalUniqueItems))
-	summary.WriteString(fmt.Sprintf("Total items: %d\n", m.inventorySummary.TotalItems))
-	summary.WriteString(fmt.Sprintf("Total wealth: %.2f HC (values from traderclub.gg)\n", m.inventorySummary.TotalWealth))
-	summary.WriteString("------------------\n")
-
-	for itemName, item := range m.inventorySummary.Items {
-		summary.WriteString(fmt.Sprintf("%s: %d (%.2f HC)\n", itemName, item.Quantity, item.HCValue))
+func (m *Manager) RefreshTradingInventoryDisplay() {
+	if m.tradeIconContainer == nil {
+		m.tradeIconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
 	}
 
-	m.summaryText.SetText(summary.String())
+	m.tradeIconContainer.Objects = nil
+
+	groupedItems := m.unifiedInventory.GetGroupedItems()
+	for _, items := range groupedItems {
+		btn := m.createGroupedItemButton(items)
+		m.tradeIconContainer.Add(btn)
+	}
+
+	m.tradeIconContainer.Refresh()
+
 }
 
-func (m *Manager) createItemButton(item inventory.Item, inTrade bool) *widget.Button {
+func (m *Manager) createGroupedItemButton(items []UnifiedItem) *widget.Button {
+	if len(items) == 0 {
+		return nil
+	}
+
 	btn := widget.NewButton("", func() {
-		if !inTrade {
-			m.showQuantityDialog([]inventory.Item{item})
+		if m.tradeManager.IsTradeOpen() {
+			m.showQuantityDialogInTradeManager(items)
+		} else {
+			m.displayItemInfo(items)
 		}
-		// If inTrade is true, the button will do nothing when clicked
 	})
 
 	btn.SetIcon(theme.AccountIcon())
 	btn.Resize(fyne.NewSize(44, 44))
 
 	go func() {
-		iconURL := common.GetIconURL(item.Class, string(item.Type), item.Props)
+		iconURL := items[0].EnrichedItem.IconURL
 		resp, err := http.Get(iconURL)
 		if err != nil {
 			return
@@ -303,7 +490,203 @@ func (m *Manager) createItemButton(item inventory.Item, inTrade bool) *widget.Bu
 	return btn
 }
 
+func (m *Manager) createStyledContainerWithButtons(content fyne.CanvasObject, title string) *fyne.Container {
+	// Create the background with rounded corners
+	background := canvas.NewRectangle(color.NRGBA{R: 212, G: 221, B: 225, A: 255})
+	background.StrokeColor = color.Black
+	background.StrokeWidth = 1.35
+	background.CornerRadius = 5
+
+	titleText := canvas.NewText(title, color.Black)
+	titleText.Alignment = fyne.TextAlignCenter
+	titleText.TextStyle = fyne.TextStyle{Bold: true}
+
+	// Create the styled container
+	styledContent := container.NewVBox(
+		container.NewCenter(titleText),
+		content,
+	)
+
+	paddedContent := container.NewVBox(
+		container.NewPadded(styledContent),
+	)
+
+	styledContainer := container.NewMax(background, paddedContent)
+	// Set minimum size to ensure coverage of the dialog area
+	minSize := fyne.NewSize(400, 200) // Adjust the size as needed
+	styledContainer.Resize(minSize)
+
+	return container.NewMax(styledContainer)
+}
+
+func (m *Manager) addItemsToTrade(items []UnifiedItem, quantity int) {
+	go func() {
+		if len(items) == 0 {
+			return
+		}
+
+		addedItems := make(map[int]inventory.Item)
+		addedCount := 0
+
+		for _, item := range items {
+			for i := 0; i < item.Quantity && addedCount < quantity; i++ {
+				if !m.tradeManager.IsTradeOpen() {
+					break
+				}
+				if !item.InTrade {
+					m.tradeManager.Offer(item.Item.ItemId)
+					m.unifiedInventory.UpdateItemTradeStatus(item.Item.ItemId, true)
+					addedItems[item.Item.ItemId] = item.Item
+					addedCount++
+					time.Sleep(550 * time.Millisecond)
+				}
+			}
+			if addedCount >= quantity {
+				break
+			}
+		}
+
+		m.RefreshInventorySummaryDisplay()
+		m.RefreshInventoryIcons()
+		m.RefreshTradingInventoryDisplay()
+	}()
+}
+
+func (m *Manager) handleTradeUpdated(args trade.Args) {
+	m.updateTradeOffers(trading.Offers{
+		Trader: args.Offers[0],
+		Tradee: args.Offers[1],
+	})
+}
+
+func (m *Manager) handleTradeAccepted(args trade.AcceptArgs) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Update only the button states
+	if m.isCurrentUser(args.Name) {
+		m.tradeAcceptButton.Disable()
+	}
+}
+
+func (m *Manager) ResetTradeManagerContent() {
+	if m.tradeManagerWindow == nil {
+		return
+	}
+
+	m.tradeOfferContainer.Objects = nil
+	m.otherOfferContainer.Objects = nil
+	m.yourTradeOffer = make(map[string]int)
+	m.theirTradeOffer = make(map[string]int)
+
+	m.tradeNewEntry.SetText("")
+	m.tradeAcceptButton.Enable()
+
+	m.tradeOfferContainer.Refresh()
+	m.otherOfferContainer.Refresh()
+	m.tradeManagerWindow.Content().Refresh()
+}
+
+func (m *Manager) ResetTradeManagerWindow() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Reset all trade-related data
+	m.yourTradeOffer = make(map[string]int)
+	m.theirTradeOffer = make(map[string]int)
+
+	// Clear containers
+	if m.tradeOfferContainer != nil {
+		m.tradeOfferContainer.Objects = nil
+	}
+	if m.otherOfferContainer != nil {
+		m.otherOfferContainer.Objects = nil
+	}
+
+	// Reset trade summary
+	if m.tradeNewEntry != nil {
+		m.tradeNewEntry.SetText("")
+	}
+
+	// Enable accept button
+	if m.tradeAcceptButton != nil {
+		m.tradeAcceptButton.Enable()
+	}
+
+	// Recreate the entire trade manager window content
+	if m.tradeManagerWindow != nil {
+		content := m.createTradeManagerWindowContent()
+		m.tradeManagerWindow.SetContent(content)
+		m.tradeManagerWindow.Content().Refresh()
+	}
+}
+
+func (m *Manager) handleTradeCompleted(args trade.Args) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.lastTrade = trading.Offers{
+		Trader: args.Offers[0],
+		Tradee: args.Offers[1],
+	}
+
+	var ourOffer, theirOffer trade.Offer
+	if m.isCurrentUser(args.Offers[0].Name) {
+		ourOffer = args.Offers[0]
+		theirOffer = args.Offers[1]
+	} else {
+		ourOffer = args.Offers[1]
+		theirOffer = args.Offers[0]
+	}
+
+	// Remove traded items from our inventory
+	for _, item := range ourOffer.Items {
+		m.unifiedInventory.RemoveItem(item.ItemId)
+	}
+
+	// Add received items to our inventory
+	for _, item := range theirOffer.Items {
+		m.unifiedInventory.AddItem(item)
+	}
+
+	m.ResetTradeManagerContent()
+
+	if m.tradeNewEntry != nil {
+		m.tradeNewEntry.SetText("Trade completed successfully.")
+	}
+
+	m.RefreshInventorySummaryDisplay()
+	m.RefreshInventoryIcons()
+	m.RefreshTradingInventoryDisplay()
+}
+
+func (m *Manager) handleTradeClosed(args trade.Args) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Reset trade status for all items
+	for itemId := range m.unifiedInventory.Items {
+		m.unifiedInventory.UpdateItemTradeStatus(itemId, false)
+	}
+
+	m.ResetTradeManagerContent()
+
+	if m.tradeNewEntry != nil {
+		m.tradeNewEntry.SetText("Trade window closed. Awaiting Trade...")
+	}
+
+	m.RefreshInventoryIcons()
+	m.RefreshTradingInventoryDisplay()
+}
+
 func (m *Manager) updateTradeOffers(offers trading.Offers) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.tradeOfferContainer == nil || m.otherOfferContainer == nil {
+		return
+	}
+
 	m.tradeOfferContainer.Objects = nil
 	m.otherOfferContainer.Objects = nil
 
@@ -357,303 +740,28 @@ func (m *Manager) updateTradeOffers(offers trading.Offers) {
 	for item, quantity := range m.theirTradeOffer {
 		summary.WriteString(fmt.Sprintf("%s [%d]\n", item, quantity))
 	}
-	m.tradeNewEntry.SetText(summary.String())
-	m.tradeNewEntry.Refresh()
 
-	// Update other entries
-	m.tradeOfferEntry.SetText(fmt.Sprintf("%s's Offer (%.2f HC)\nItems: %d\nAccepted: %t", myName, myTotalHC, len(myOffer.Items), myOffer.Accepted))
-	m.otherOfferEntry.SetText(fmt.Sprintf("%s's Offer (%.2f HC)\nItems: %d\nAccepted: %t", theirName, theirTotalHC, len(theirOffer.Items), theirOffer.Accepted))
-}
+	if m.tradeNewEntry != nil {
+		m.tradeNewEntry.SetText(summary.String())
+	}
 
-func (m *Manager) handleTradeUpdated(args trade.Args) {
-	m.updateTradeOffers(trading.Offers{
-		Trader: args.Offers[0],
-		Tradee: args.Offers[1],
-	})
-}
-
-func (m *Manager) handleTradeAccepted(args trade.AcceptArgs) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Update only the button states
-	if m.isCurrentUser(args.Name) {
-		m.tradeAcceptButton.Disable()
+	if m.tradeManagerWindow != nil {
+		m.tradeManagerWindow.Content().Refresh()
 	}
 }
 
-func (m *Manager) showTradeConfirmationDialog() {
-	var myOfferSummary, theirOfferSummary strings.Builder
-
-	// Summarize your offer
-	if len(m.yourTradeOffer) == 0 {
-		myOfferSummary.WriteString("Nothing")
-	} else {
-		for item, quantity := range m.yourTradeOffer {
-			myOfferSummary.WriteString(fmt.Sprintf("%d %s\n", quantity, item))
-		}
-	}
-
-	// Summarize their offer
-	if len(m.theirTradeOffer) == 0 {
-		theirOfferSummary.WriteString("Nothing")
-	} else {
-		for item, quantity := range m.theirTradeOffer {
-			theirOfferSummary.WriteString(fmt.Sprintf("%d %s\n", quantity, item))
-		}
-	}
-
-	content := container.NewVBox(
-		widget.NewLabel("You are about to trade:"),
-		widget.NewLabel(myOfferSummary.String()),
-		widget.NewLabel("\nYou will receive:"),
-		widget.NewLabel(theirOfferSummary.String()),
-	)
-
-	dialogContent := m.createStyledContainerWithButtons(content, "Confirmation")
-
-	dialog.ShowCustomConfirm("Confirm Trade", "Confirm", "Cancel",
-		dialogContent,
-		func(confirmed bool) {
-			if confirmed {
-				m.tradeManager.Accept()
-			}
-			// If not confirmed, do nothing and return to main UI
-		},
-		m.window,
-	)
-}
-
-func (m *Manager) handleTradeCompleted(args trade.Args) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.lastTrade = trading.Offers{
-		Trader: args.Offers[0],
-		Tradee: args.Offers[1],
-	}
-
-	var ourOffer, theirOffer trade.Offer
-	if m.isCurrentUser(args.Offers[0].Name) {
-		ourOffer = args.Offers[0]
-		theirOffer = args.Offers[1]
-	} else {
-		ourOffer = args.Offers[1]
-		theirOffer = args.Offers[0]
-	}
-
-	// Remove traded items from our inventory
-	for _, item := range ourOffer.Items {
-		m.removeItemFromInventory(item)
-	}
-
-	// Add received items to our inventory
-	for _, item := range theirOffer.Items {
-		m.addItemToInventory(item)
-	}
-
-	// Clear the trade offers and itemsInTrade
-	m.clearTradeOffers()
-	m.itemsInTrade = make(map[string][]inventory.Item)
-
-	// Update the trading inventory display
-	m.updateTradingInventoryAfterTradeClosed()
-
-	m.tradeAcceptButton.Enable()
-
-	// Remove traded items from our inventory
-	for _, item := range ourOffer.Items {
-		m.UpdateInventorySummaryForTrade(item, true)
-	}
-
-	// Add received items to our inventory
-	for _, item := range theirOffer.Items {
-		m.UpdateInventorySummaryForTrade(item, false)
-	}
-}
-
-func (m *Manager) removeItemFromInventory(item inventory.Item) {
-	for btn, items := range m.buttonToItems {
-		for i, invItem := range items {
-			if invItem.ItemId == item.ItemId {
-				// Remove the item from the slice
-				m.buttonToItems[btn] = append(items[:i], items[i+1:]...)
-
-				// If no items left, remove the button
-				if len(m.buttonToItems[btn]) == 0 {
-					delete(m.buttonToItems, btn)
-					m.tradeIconContainer.Remove(btn)
-				} else {
-					// Update the button with the new item count
-					newBtn := m.createGroupedItemButton(m.buttonToItems[btn])
-					m.tradeIconContainer.Remove(btn)
-					m.tradeIconContainer.Add(newBtn)
-					m.buttonToItems[newBtn] = m.buttonToItems[btn]
-					delete(m.buttonToItems, btn)
-				}
-				return
-			}
-		}
-	}
-}
-
-func (m *Manager) addItemToInventory(item inventory.Item) {
-	key := getItemKey(item)
-	for btn, items := range m.buttonToItems {
-		if len(items) > 0 && getItemKey(items[0]) == key {
-			// Item group already exists, just add the new item
-			m.buttonToItems[btn] = append(items, item)
-
-			// Update the button to reflect the new quantity
-			newBtn := m.createGroupedItemButton(m.buttonToItems[btn])
-			m.tradeIconContainer.Remove(btn)
-			m.tradeIconContainer.Add(newBtn)
-			m.buttonToItems[newBtn] = m.buttonToItems[btn]
-			delete(m.buttonToItems, btn)
-
-			return
-		}
-	}
-
-	// If we didn't find an existing button for this item type, create a new one
-	newBtn := m.createGroupedItemButton([]inventory.Item{item})
-	m.tradeIconContainer.Add(newBtn)
-	m.buttonToItems[newBtn] = []inventory.Item{item}
-}
-
-func (m *Manager) refreshTradeIconList() {
-	m.tradeIconContainer.Objects = nil
-	for btn, items := range m.buttonToItems {
-		if len(items) > 0 {
-			newBtn := m.createGroupedItemButton(items)
-			m.tradeIconContainer.Add(newBtn)
-			m.buttonToItems[newBtn] = items
-			delete(m.buttonToItems, btn)
-		}
-	}
-	m.tradeIconContainer.Refresh()
-}
-
-func (m *Manager) handleTradeClosed(args trade.Args) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Clear the trade offers first
-	m.clearTradeOffers()
-
-	// Create a temporary map to hold all items
-	allItems := make(map[string][]inventory.Item)
-
-	// Add existing items from buttonToItems to allItems
-	for _, items := range m.buttonToItems {
-		for _, item := range items {
-			key := getItemKey(item)
-			allItems[key] = append(allItems[key], item)
-		}
-	}
-
-	// Add items from itemsInTrade to allItems
-	for _, items := range m.itemsInTrade {
-		for _, item := range items {
-			key := getItemKey(item)
-			allItems[key] = append(allItems[key], item)
-		}
-	}
-
-	// Clear existing buttonToItems and itemsInTrade
-	m.buttonToItems = make(map[*widget.Button][]inventory.Item)
-	m.itemsInTrade = make(map[string][]inventory.Item)
-
-	// Rebuild buttonToItems with all items
-	m.tradeIconContainer.Objects = nil
-	for _, items := range allItems {
-		btn := m.createGroupedItemButton(items)
-		m.tradeIconContainer.Add(btn)
-		m.buttonToItems[btn] = items
-	}
-
-	// Return items from itemsInTrade back to the inventory
-	for _, items := range m.itemsInTrade {
-		for _, item := range items {
-			m.UpdateInventorySummaryForTrade(item, false)
-		}
-	}
-
-	m.tradeIconContainer.Refresh()
-	m.RefreshInventorySummaryDisplay()
-	m.tradeAcceptButton.Enable()
-}
-
-// Helper function to get a unique key for an item
-func getItemKey(item inventory.Item) string {
-	return fmt.Sprintf("%s_%s_%s", item.Class, item.Type, item.Props)
-}
-
-func (m *Manager) updateTradingInventoryAfterTradeClosed() {
-	// Clear the trade icon container
-	m.tradeIconContainer.Objects = nil
-
-	// Repopulate the trade icon container
-	for _, items := range m.buttonToItems {
-		btn := m.createGroupedItemButton(items)
-		m.tradeIconContainer.Add(btn)
-	}
-
-	m.tradeIconContainer.Refresh()
-
-}
-
-func (m *Manager) clearTradeOffers() {
-	m.tradeOfferContainer.Objects = nil
-	m.otherOfferContainer.Objects = nil
-	m.yourTradeOffer = make(map[string]int)
-	m.theirTradeOffer = make(map[string]int)
-
-	m.tradeOfferContainer.Refresh()
-	m.otherOfferContainer.Refresh()
-
-	m.tradeOfferEntry.SetText("")
-	m.otherOfferEntry.SetText("")
-	m.tradeNewEntry.SetText("")
-}
-
-func (m *Manager) isCurrentUser(name string) bool {
-	return m.profileManager.Profile.Name == name
-}
-
-func (m *Manager) updateTradingInventoryDisplay(items map[int]inventory.Item) {
-	m.tradeIconContainer.Objects = nil
-	m.buttonToItems = make(map[*widget.Button][]inventory.Item)
-
-	groupedItems := make(map[string][]inventory.Item)
-	for _, item := range items {
-		key := getItemKey(item)
-		groupedItems[key] = append(groupedItems[key], item)
-	}
-
-	for _, itemGroup := range groupedItems {
-		btn := m.createGroupedItemButton(itemGroup)
-		m.tradeIconContainer.Add(btn)
-		m.buttonToItems[btn] = itemGroup
-	}
-
-	m.tradeIconContainer.Refresh()
-}
-
-func (m *Manager) createGroupedItemButton(items []inventory.Item) *widget.Button {
-	if len(items) == 0 {
-		return nil
-	}
-
+func (m *Manager) createItemButton(item inventory.Item, inTrade bool) *widget.Button {
 	btn := widget.NewButton("", func() {
-		m.showQuantityDialog(items)
+		if !inTrade {
+			m.showQuantityDialogInTradeManager([]UnifiedItem{{Item: item, EnrichedItem: common.EnrichInventoryItem(item), Quantity: 1}})
+		}
 	})
 
 	btn.SetIcon(theme.AccountIcon())
 	btn.Resize(fyne.NewSize(44, 44))
 
 	go func() {
-		iconURL := common.GetIconURL(items[0].Class, string(items[0].Type), items[0].Props)
+		iconURL := common.GetIconURL(item.Class, string(item.Type), item.Props)
 		resp, err := http.Get(iconURL)
 		if err != nil {
 			return
@@ -673,158 +781,18 @@ func (m *Manager) createGroupedItemButton(items []inventory.Item) *widget.Button
 	return btn
 }
 
-func (m *Manager) showQuantityDialog(items []inventory.Item) {
-	if len(items) == 0 {
-		return
+func (m *Manager) RefreshTradeManagerWindow() {
+	if m.tradeManagerWindow != nil {
+		m.tradeManagerWindow.Content().Refresh()
+
+		// Recreate the trade manager window content
+		content := m.createTradeManagerWindowContent()
+		m.tradeManagerWindow.SetContent(content)
 	}
-
-	quantityEntry := widget.NewEntry()
-
-	representative := items[0]
-
-	// Calculate available quantity
-	maxQuantity := len(items)
-
-	dialogContent := container.NewVBox(
-		widget.NewLabel(fmt.Sprintf("Enter quantity for %s (max %d):", common.GetItemName(representative.Class, string(representative.Type), representative.Props), maxQuantity)),
-		quantityEntry,
-	)
-
-	dialogContentWrapper := m.createStyledContainerWithButtons(dialogContent, "")
-
-	dialog.ShowCustomConfirm("", "Confirm", "Cancel",
-		dialogContentWrapper,
-		func(confirmed bool) {
-			if confirmed {
-				quantity, err := strconv.Atoi(quantityEntry.Text)
-				if err != nil || quantity <= 0 || quantity > maxQuantity {
-					dialog.ShowError(errors.New("Please enter a valid number between 1 and "+strconv.Itoa(maxQuantity)), m.window)
-					return
-				}
-				m.addItemsToTrade(items[:quantity], quantity)
-
-				progress := dialog.NewProgress("Adding Items", "Adding items to trade...", m.window)
-				go func() {
-					for i := 0; i < quantity; i++ {
-						progress.SetValue(float64(i+1) / float64(quantity))
-						time.Sleep(550 * time.Millisecond)
-					}
-					progress.Hide()
-				}()
-			}
-		},
-		m.window,
-	)
 }
 
-func (m *Manager) createStyledContainerWithButtons(content fyne.CanvasObject, title string) *fyne.Container {
-	// Create the background with rounded corners
-	background := canvas.NewRectangle(color.NRGBA{R: 212, G: 221, B: 225, A: 255})
-	background.StrokeColor = color.Black
-	background.StrokeWidth = 1.35
-	background.CornerRadius = 5
-
-	titleText := canvas.NewText(title, color.Black)
-	titleText.Alignment = fyne.TextAlignCenter
-	titleText.TextStyle = fyne.TextStyle{Bold: true}
-
-	// Create the styled container
-	styledContent := container.NewVBox(
-		container.NewCenter(titleText),
-		content,
-	)
-
-	paddedContent := container.NewVBox(
-		container.NewPadded(styledContent),
-	)
-
-	styledContainer := container.NewMax(background, paddedContent)
-	// Set minimum size to ensure coverage of the dialog area
-	minSize := fyne.NewSize(400, 200) // Adjust the size as needed
-	styledContainer.Resize(minSize)
-
-	return container.NewMax(styledContainer)
-}
-
-func (m *Manager) UpdateTradingInventoryAfterAddingItems(addedItems map[int]inventory.Item) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for i := len(m.tradeIconContainer.Objects) - 1; i >= 0; i-- {
-		obj := m.tradeIconContainer.Objects[i]
-		if btn, ok := obj.(*widget.Button); ok {
-			if items, exists := m.buttonToItems[btn]; exists {
-				updatedItems := make([]inventory.Item, 0)
-				for _, item := range items {
-					if _, added := addedItems[item.ItemId]; !added {
-						updatedItems = append(updatedItems, item)
-					}
-				}
-				if len(updatedItems) == 0 {
-					m.tradeIconContainer.Remove(btn)
-					delete(m.buttonToItems, btn)
-				} else {
-					m.buttonToItems[btn] = updatedItems
-					// No need to update OnTapped, it will use the updated items automatically
-				}
-			}
-		}
-	}
-
-	m.tradeIconContainer.Refresh()
-}
-
-func (m *Manager) addItemsToTrade(items []inventory.Item, quantity int) {
-	go func() {
-		if len(items) == 0 {
-			return
-		}
-
-		key := getItemKey(items[0])
-		addedItems := make(map[int]inventory.Item)
-
-		for i := 0; i < quantity && i < len(items); i++ {
-			if !m.tradeManager.IsTradeOpen() {
-				break
-			}
-			item := items[i]
-			m.tradeManager.Offer(item.ItemId)
-			m.UpdateInventorySummaryForTrade(item, true)
-			addedItems[item.ItemId] = item
-
-			// Move item to itemsInTrade
-			m.itemsInTrade[key] = append(m.itemsInTrade[key], item)
-
-			time.Sleep(550 * time.Millisecond)
-		}
-
-		m.RefreshInventorySummaryDisplay()
-
-		// Update only the affected icon
-		m.updateSingleTradeIcon(key, len(addedItems))
-	}()
-}
-
-func (m *Manager) updateSingleTradeIcon(key string, removedQuantity int) {
-	for btn, items := range m.buttonToItems {
-		if len(items) > 0 && getItemKey(items[0]) == key {
-			updatedItems := items[removedQuantity:]
-			if len(updatedItems) == 0 {
-				// Remove the button if no items left
-				m.tradeIconContainer.Remove(btn)
-				delete(m.buttonToItems, btn)
-			} else {
-				// Update the button with remaining items
-				newBtn := m.createGroupedItemButton(updatedItems)
-				m.tradeIconContainer.Add(newBtn)
-				m.buttonToItems[newBtn] = updatedItems
-				m.tradeIconContainer.Remove(btn)
-				delete(m.buttonToItems, btn)
-			}
-			m.tradeIconContainer.Refresh()
-			return
-		}
-	}
+func (m *Manager) isCurrentUser(name string) bool {
+	return m.profileManager.Profile.Name == name
 }
 
 func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]room.Item) {
@@ -838,11 +806,9 @@ func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]r
 
 	// Repopulate room icons
 	for _, obj := range objects {
-		// Add icon for object (you'll need to implement this part)
 		m.addObjectIcon(obj)
 	}
 	for _, item := range items {
-		// Add icon for item (you'll need to implement this part)
 		m.addItemIcon(item)
 	}
 	m.roomIconContainer.Refresh()
@@ -902,11 +868,9 @@ func (m *Manager) Run() {
 
 	inventoryTab := m.setupInventoryTab()
 	roomSummaryTab := m.setupRoomSummaryTab()
-	tradingTab := m.setupTradingTab()
 
-	tabs := NewCustomTabContainer(m, "Inventory", "Room", "Trading")
+	tabs := NewCustomTabContainer(m, "Inventory", "Room")
 	m.scanButton = tabs.scanButton
-	//m.discordButton = tabs.discordButton
 	tabs.Refresh()
 
 	content := container.NewMax()
@@ -922,9 +886,6 @@ func (m *Manager) Run() {
 			}
 		case 1:
 			content.Objects = []fyne.CanvasObject{roomSummaryTab}
-			tabs.scanButton.OnTapped = func() {}
-		case 2:
-			content.Objects = []fyne.CanvasObject{tradingTab}
 			tabs.scanButton.OnTapped = func() {}
 		}
 		content.Refresh()
@@ -946,10 +907,6 @@ func (m *Manager) Run() {
 	m.window.SetContent(mainContainer)
 	m.window.Resize(fyne.NewSize(275, 300))
 	m.window.SetPadded(true)
-
-	m.mu.Lock()
-	m.window.Hide()
-	m.mu.Unlock()
 
 	m.window.ShowAndRun()
 }
@@ -1000,39 +957,6 @@ func (m *Manager) UpdateDiscordButtonState(active bool) {
 	}
 }
 
-func (m *Manager) setupInventoryTab() *fyne.Container {
-	m.inventoryText = widget.NewMultiLineEntry()
-	m.inventoryText.Wrapping = fyne.TextWrapWord
-	m.inventoryText.SetPlaceHolder("Click on Item icons to view more information.")
-	m.inventoryText.SetMinRowsVisible(10)
-
-	m.summaryText = widget.NewMultiLineEntry()
-	m.summaryText.Wrapping = fyne.TextWrapWord
-	m.summaryText.SetPlaceHolder("Click on 'Scan' to begin scanning your inventory!")
-	m.summaryText.SetMinRowsVisible(10)
-
-	m.iconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
-	itemsScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.iconContainer))))
-
-	m.itemsEntry = widget.NewMultiLineEntry()
-	m.itemsEntry.Wrapping = fyne.TextWrapWord
-	m.itemsEntry.SetPlaceHolder("Items")
-	m.itemsEntry.Disable()
-	m.itemsEntry.SetMinRowsVisible(8)
-
-	itemsContainer := container.NewStack(m.itemsEntry, itemsScroll)
-
-	summaryContainer := m.createTitledContainer(m.summaryText, "Inventory Summary")
-	itemsContainer = m.createTitledContainer(itemsContainer, "Items")
-	idContainer := m.createTitledContainer(m.inventoryText, "Item IDs")
-
-	return container.NewVBox(
-		summaryContainer,
-		itemsContainer,
-		idContainer,
-	)
-}
-
 func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 	m.roomText = widget.NewMultiLineEntry()
 	m.roomText.Wrapping = fyne.TextWrapWord
@@ -1046,14 +970,7 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 
 	m.roomIconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
 	roomItemsScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.roomIconContainer))))
-
-	m.roomItemsEntry = widget.NewMultiLineEntry()
-	m.roomItemsEntry.Wrapping = fyne.TextWrapWord
-	m.roomItemsEntry.SetPlaceHolder("Room Items")
-	m.roomItemsEntry.Disable()
-	m.roomItemsEntry.SetMinRowsVisible(8)
-
-	roomItemsContainer := container.NewStack(m.roomItemsEntry, roomItemsScroll)
+	roomItemsScroll.SetMinSize(fyne.NewSize(0, 125)) // Adjust this value to make it longer vertically
 
 	var selectedItemIds []int
 
@@ -1075,7 +992,7 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 		for _, objects := range enrichedObjects {
 			btn := widget.NewButton("", func() {
 				var details strings.Builder
-				selectedItemIds = make([]int, 0, len(objects)) // Clear and preallocate
+				selectedItemIds = make([]int, 0, len(objects))
 
 				details.WriteString(fmt.Sprintf("Name: %s\n", objects[0].Name))
 				details.WriteString(fmt.Sprintf("Count: %d\n", len(objects)))
@@ -1088,7 +1005,7 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 					selectedItemIds = append(selectedItemIds, obj.Id)
 				}
 				m.roomText.SetText(details.String())
-				m.roomActionButton.SetActive(false) // Enable the pickup button when items are selected
+				m.roomActionButton.SetActive(true)
 			})
 
 			btn.SetIcon(theme.AccountIcon())
@@ -1117,7 +1034,7 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 		for _, items := range enrichedItems {
 			btn := widget.NewButton("", func() {
 				var details strings.Builder
-				selectedItemIds = make([]int, 0, len(items)) // Clear and preallocate
+				selectedItemIds = make([]int, 0, len(items))
 
 				details.WriteString(fmt.Sprintf("Name: %s\n", items[0].Name))
 				details.WriteString(fmt.Sprintf("Count: %d\n", len(items)))
@@ -1129,7 +1046,7 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 					selectedItemIds = append(selectedItemIds, item.Id)
 				}
 				m.roomText.SetText(details.String())
-				m.roomActionButton.SetActive(false) // Enable the pickup button when items are selected
+				m.roomActionButton.SetActive(true)
 			})
 
 			btn.SetIcon(theme.AccountIcon())
@@ -1158,9 +1075,9 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 		m.roomIconContainer.Refresh()
 	}
 
-	roomSummaryContainer := m.createTitledContainer(m.roomSummaryText, "Room Summary")
-	roomItemsContainer = m.createTitledContainer(roomItemsContainer, "Room Items")
-	roomIdContainer := m.createTitledContainer(m.roomText, "Room Item IDs")
+	roomSummaryContainer := m.createStyledMultiLineEntryContainer(m.roomSummaryText, "Room Summary")
+	roomItemsContainer := m.createStyledContainerWithButtons(roomItemsScroll, "Room Items")
+	roomIdContainer := m.createStyledMultiLineEntryContainer(m.roomText, "Room Item IDs")
 
 	m.roomActionButton = newCustomPickupButton(loadRoomActionIcon(), func() {
 		if len(selectedItemIds) > 0 {
@@ -1168,7 +1085,7 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 			go func() {
 				m.pickupManager.PickupItems(selectedItemIds, func() {
 					m.roomActionButton.SetActive(false)
-					m.UpdateRoomDisplayAfterPickup() // Update one last time after all items are picked up
+					m.UpdateRoomDisplayAfterPickup()
 				})
 			}()
 		}
@@ -1176,7 +1093,6 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 
 	actionButtonContainer := container.NewHBox(layout.NewSpacer(), m.roomActionButton, layout.NewSpacer())
 
-	// Store the updateRoomDisplay function in the Manager for later use
 	m.updateRoomDisplayFunc = updateRoomDisplay
 
 	return container.NewVBox(
@@ -1187,83 +1103,36 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 	)
 }
 
-func (m *Manager) setupTradingTab() *fyne.Container {
-	m.tradeText = widget.NewMultiLineEntry()
-	m.tradeText.Wrapping = fyne.TextWrapWord
-	m.tradeText.SetPlaceHolder("Trade Item IDs")
-	m.tradeText.SetMinRowsVisible(10)
+func (m *Manager) createInventoryWindow() fyne.Window {
+	inventoryWindow := m.app.NewWindow("Unified Inventory")
+	inventoryWindow.SetIcon(m.window.Icon())
 
-	m.tradeSummaryText = widget.NewMultiLineEntry()
-	m.tradeSummaryText.Wrapping = fyne.TextWrapWord
-	m.tradeSummaryText.SetPlaceHolder("Trade Summary")
-	m.tradeSummaryText.SetMinRowsVisible(10)
+	if m.iconContainer == nil {
+		m.iconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
+	}
 
-	// Set up the trade summary container
-	m.tradeNewEntry = widget.NewMultiLineEntry()
-	m.tradeNewEntry.Wrapping = fyne.TextWrapWord
-	m.tradeNewEntry.SetPlaceHolder("Trade Summary")
-	m.tradeNewEntry.SetMinRowsVisible(8)
+	itemsScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.iconContainer))))
+	itemsScroll.SetMinSize(fyne.NewSize(36, 36*8)) // Set the minimum rows visible to 30
 
-	tradeNewContainer := container.NewVBox(m.tradeNewEntry)
+	styledContainer := m.createStyledContainerWithButtons(itemsScroll, "Inventory Items")
 
-	m.tradeIconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
-	tradeItemsScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.tradeIconContainer))))
+	inventoryWindow.SetContent(styledContainer)
+	inventoryWindow.Resize(fyne.NewSize(300, 400))
 
-	m.tradeItemsEntry = widget.NewMultiLineEntry()
-	m.tradeItemsEntry.Wrapping = fyne.TextWrapWord
-	m.tradeItemsEntry.SetPlaceHolder("Your Inventory")
-	m.tradeItemsEntry.Disable()
-	m.tradeItemsEntry.SetMinRowsVisible(8)
-
-	tradeItemsContainer := container.NewStack(m.tradeItemsEntry, tradeItemsScroll)
-
-	m.tradeOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
-	m.otherOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
-
-	tradeOfferScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.tradeOfferContainer))))
-	otherOfferScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.otherOfferContainer))))
-
-	m.tradeOfferEntry = widget.NewMultiLineEntry()
-	m.tradeOfferEntry.Wrapping = fyne.TextWrapWord
-	m.tradeOfferEntry.SetPlaceHolder("Your Offer")
-	m.tradeOfferEntry.Disable()
-	m.tradeOfferEntry.SetMinRowsVisible(8)
-
-	m.otherOfferEntry = widget.NewMultiLineEntry()
-	m.otherOfferEntry.Wrapping = fyne.TextWrapWord
-	m.otherOfferEntry.SetPlaceHolder("Their Offer")
-	m.otherOfferEntry.Disable()
-	m.otherOfferEntry.SetMinRowsVisible(8)
-
-	tradeOfferContainer := container.NewStack(m.tradeOfferEntry, tradeOfferScroll)
-	otherOfferContainer := container.NewStack(m.otherOfferEntry, otherOfferScroll)
-
-	m.tradeAcceptButton = widget.NewButton("Accept Trade", func() {
-		m.showTradeConfirmationDialog()
+	inventoryWindow.SetCloseIntercept(func() {
+		inventoryWindow.Hide()
 	})
 
-	actionButtonContainer := container.NewHBox(
-		layout.NewSpacer(),
-		m.tradeAcceptButton,
-		layout.NewSpacer(),
-	)
-
-	return container.NewVBox(
-		m.createTitledContainer(tradeNewContainer, "Trade Summary"),
-		m.createTitledContainer(tradeItemsContainer, "Your Inventory"),
-		m.createTitledContainer(tradeOfferContainer, "Your Offer"),
-		m.createTitledContainer(otherOfferContainer, "Their Offer"),
-		actionButtonContainer,
-	)
+	return inventoryWindow
 }
 
-func (m *Manager) createTitledContainer(content fyne.CanvasObject, title string) *fyne.Container {
-	titleText := canvas.NewText(title, color.White)
-	titleText.Alignment = fyne.TextAlignCenter
-	titleText.TextStyle = fyne.TextStyle{Bold: true}
-	titleText.TextSize = 0
-	titleText.TextStyle.Monospace = true
-	return container.NewBorder(titleText, nil, nil, nil, content)
+func (m *Manager) ShowInventoryWindow() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.inventoryWindow == nil {
+		m.inventoryWindow = m.createInventoryWindow()
+	}
+	m.inventoryWindow.Show()
 }
 
 func (m *Manager) addObjectIcon(obj room.Object) {
@@ -1508,11 +1377,11 @@ func (r *customTabContainerRenderer) Refresh() {
 }
 
 func (r *customTabContainerRenderer) Objects() []fyne.CanvasObject {
-	objects := make([]fyne.CanvasObject, len(r.container.tabs)+1) // Adjusted to +1
+	objects := make([]fyne.CanvasObject, len(r.container.tabs)+1)
 	for i, tab := range r.container.tabs {
 		objects[i] = tab
 	}
-	objects[len(objects)-1] = r.container.scanButton // Adjusted to use scanButton
+	objects[len(objects)-1] = r.container.scanButton
 	return objects
 }
 
@@ -1703,4 +1572,106 @@ func loadFontResource(filename string) fyne.Resource {
 		return theme.DefaultTextFont()
 	}
 	return res
+}
+
+func (m *Manager) displayItemInfo(items []UnifiedItem) {
+	if len(items) == 0 {
+		return
+	}
+
+	var details strings.Builder
+	representative := items[0]
+
+	details.WriteString(fmt.Sprintf("Item name: %s [%d]\n", representative.EnrichedItem.Name, len(items)))
+	details.WriteString(fmt.Sprintf("Total HC value: %.2f\n", representative.EnrichedItem.HCValue*float64(len(items))))
+	details.WriteString("Item IDs:\n")
+
+	for _, item := range items {
+		details.WriteString(fmt.Sprintf("%d\n", item.Item.ItemId))
+	}
+
+	m.inventoryText.SetText(details.String())
+}
+
+func (m *Manager) showTradeConfirmationDialog() {
+	var myOfferSummary, theirOfferSummary strings.Builder
+
+	// Summarize your offer
+	if len(m.yourTradeOffer) == 0 {
+		myOfferSummary.WriteString("Nothing")
+	} else {
+		for item, quantity := range m.yourTradeOffer {
+			myOfferSummary.WriteString(fmt.Sprintf("%d %s\n", quantity, item))
+		}
+	}
+
+	// Summarize their offer
+	if len(m.theirTradeOffer) == 0 {
+		theirOfferSummary.WriteString("Nothing")
+	} else {
+		for item, quantity := range m.theirTradeOffer {
+			theirOfferSummary.WriteString(fmt.Sprintf("%d %s\n", quantity, item))
+		}
+	}
+
+	content := container.NewVBox(
+		widget.NewLabel("You are about to trade:"),
+		widget.NewLabel(myOfferSummary.String()),
+		widget.NewLabel("\nYou will receive:"),
+		widget.NewLabel(theirOfferSummary.String()),
+	)
+
+	dialogContent := m.createStyledContainerWithButtons(content, "Confirmation")
+
+	dialog.ShowCustomConfirm("", "Confirm", "Cancel",
+		dialogContent,
+		func(confirmed bool) {
+			if confirmed {
+				m.tradeManager.Accept()
+			}
+			// If not confirmed, do nothing and return to main UI
+		},
+		m.window,
+	)
+}
+
+func (m *Manager) createStyledScrollContainer(content fyne.CanvasObject, title string) *fyne.Container {
+	background := canvas.NewRectangle(color.NRGBA{R: 212, G: 221, B: 225, A: 255})
+	background.StrokeColor = color.Black
+	background.StrokeWidth = 1.35
+	background.CornerRadius = 5
+
+	titleText := canvas.NewText(title, color.Black)
+	titleText.Alignment = fyne.TextAlignCenter
+	titleText.TextStyle = fyne.TextStyle{Bold: true}
+
+	scrollContainer := container.NewScroll(content)
+	scrollContainer.SetMinSize(fyne.NewSize(0, 150)) // Adjust the height as needed
+
+	contentWithTitle := container.NewBorder(
+		container.NewCenter(titleText),
+		nil, nil, nil,
+		scrollContainer,
+	)
+
+	return container.NewMax(background, container.NewPadded(contentWithTitle))
+}
+
+func (m *Manager) createStyledMultiLineEntryContainer(content *widget.Entry, title string) *fyne.Container {
+	background := canvas.NewRectangle(color.NRGBA{R: 212, G: 221, B: 225, A: 255})
+	background.StrokeColor = color.Black
+	background.StrokeWidth = 1.35
+	background.CornerRadius = 5
+
+	titleText := canvas.NewText(title, color.Black)
+	titleText.Alignment = fyne.TextAlignCenter
+	titleText.TextStyle = fyne.TextStyle{Bold: true}
+
+	contentWithTitle := container.NewBorder(
+		container.NewCenter(titleText),
+		nil, nil, nil,
+		content,
+	)
+
+	return container.NewMax(background, container.NewPadded(contentWithTitle))
 }

@@ -4,10 +4,7 @@ go 1.22.5
 
 require fyne.io/fyne/v2 v2.4.5
 
-require (
-	github.com/karalabe/xgo v0.0.0-20191115072854-c5ccff8648a7 // indirect
-	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
-)
+require golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
 
 require (
 	fyne.io/systray v1.10.1-0.20231115130155-104f5ef7839e // indirect

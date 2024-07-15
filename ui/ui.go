@@ -623,6 +623,11 @@ func (m *Manager) addItemsToTrade(items []UnifiedItem, quantity int) {
 }
 
 func (m *Manager) handleTradeUpdated(args trade.Args) {
+	// Determine if the trade is opened by checking if both offers are empty
+	opened := len(args.Offers[0].Items) == 0 && len(args.Offers[1].Items) == 0
+	if opened {
+		m.HandleTradeStatus(true)
+	}
 	m.updateTradeOffers(trading.Offers{
 		Trader: args.Offers[0],
 		Tradee: args.Offers[1],
@@ -692,7 +697,6 @@ func (m *Manager) ResetTradeManagerWindow() {
 }
 
 func (m *Manager) handleTradeCompleted(args trade.Args) {
-	fmt.Println("handleTradeCompleted called")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -759,14 +763,14 @@ func (m *Manager) handleTradeCompleted(args trade.Args) {
 		ItemIDsReceived:  theirOfferItemIDs,
 		HCValuesReceived: theirOfferHCValues,
 	}
-	fmt.Printf("Log Entry: %+v\n", logEntry)
+
 	m.tradeLogMutex.Lock()
 	m.tradeLog = append(m.tradeLog, logEntry)
 	m.tradeLogMutex.Unlock()
 
 	// If the Trade Log window is open, update it
 	if m.tradeLogVisible {
-		fmt.Println("Updating Trade Log UI")
+
 		m.updateTradeLogUI()
 	}
 
@@ -861,11 +865,9 @@ func (ui *UnifiedInventory) GetItemByName(name string) *common.EnrichedInventory
 
 	for _, item := range ui.Items {
 		if item.EnrichedItem.Name == name {
-			fmt.Printf("Found item: %+v\n", item)
 			return &item.EnrichedItem
 		}
 	}
-	fmt.Printf("Item not found: %s\n", name)
 	return nil
 }
 
@@ -1746,7 +1748,7 @@ func (m *habboTheme) Size(name fyne.ThemeSizeName) float32 {
 	case theme.SizeNameText:
 		return 9
 	case theme.SizeNamePadding:
-		return 6
+		return 8
 	case theme.SizeNameInlineIcon:
 		return 30
 	case theme.SizeNameScrollBar:
@@ -1869,4 +1871,10 @@ func (m *Manager) createStyledMultiLineEntryContainer(content *widget.Entry, tit
 	)
 
 	return container.NewMax(background, container.NewPadded(contentWithTitle))
+}
+
+func (m *Manager) HandleTradeStatus(opened bool) {
+	if opened {
+		m.ShowTradeManagerWindow()
+	}
 }

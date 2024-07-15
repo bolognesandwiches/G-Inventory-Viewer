@@ -101,6 +101,11 @@ type Manager struct {
 	inventoryWindow            fyne.Window
 	tradeManagerWindow         fyne.Window
 	quantityDialog             *dialog.CustomDialog
+	tradeLog                   []TradeLogEntry
+	tradeLogMutex              sync.Mutex
+	tradeLogWindow             fyne.Window
+	tradeLogEntry              *widget.Entry
+	tradeLogVisible            bool
 }
 
 func NewUnifiedInventory() *UnifiedInventory {
@@ -179,9 +184,14 @@ func (m *Manager) createTradeManagerWindow() fyne.Window {
 		m.showTradeConfirmationDialog()
 	})
 
+	tradeLogButton := widget.NewButton("Trade Log", func() {
+		m.ShowTradeLogWindow()
+	})
+
 	actionButtonContainer := container.NewHBox(
 		layout.NewSpacer(),
 		m.tradeAcceptButton,
+		tradeLogButton,
 		layout.NewSpacer(),
 	)
 
@@ -201,6 +211,63 @@ func (m *Manager) createTradeManagerWindow() fyne.Window {
 
 	return tradeWindow
 }
+
+type TradeLogEntry struct {
+	ID               int
+	Date             string
+	Trader           string
+	Tradee           string
+	ItemsTraded      []string
+	ItemIDsTraded    []int
+	HCValuesTraded   []float64
+	ItemsReceived    []string
+	ItemIDsReceived  []int
+	HCValuesReceived []float64
+}
+
+func (m *Manager) ShowTradeLogWindow() {
+	if m.tradeLogWindow == nil {
+		m.tradeLogWindow = m.createTradeLogWindow()
+	}
+	m.updateTradeLogUI()
+	m.tradeLogWindow.Show()
+	m.tradeLogVisible = true // Set the visibility flag
+}
+
+func (m *Manager) createTradeLogWindow() fyne.Window {
+	tradeLogWindow := m.app.NewWindow("Trade Log")
+	tradeLogWindow.SetIcon(m.window.Icon())
+
+	m.tradeLogEntry = widget.NewMultiLineEntry()
+	m.tradeLogEntry.Wrapping = fyne.TextWrapWord
+	m.tradeLogEntry.SetPlaceHolder("Trade Log")
+	m.tradeLogEntry.SetMinRowsVisible(40)
+
+	// Set the font to a monospaced font for consistent alignment
+	m.tradeLogEntry.TextStyle = fyne.TextStyle{Monospace: false}
+
+	exportButton := widget.NewButton("Export to CSV", func() {
+		m.exportTradeLogToCSV()
+	})
+
+	tradeLogContainer := m.createStyledMultiLineEntryContainer(m.tradeLogEntry, "Trade Log")
+
+	content := container.NewVBox(
+		tradeLogContainer,
+		exportButton,
+	)
+
+	tradeLogWindow.SetContent(content)
+	tradeLogWindow.Resize(fyne.NewSize(600, 400))
+
+	tradeLogWindow.SetCloseIntercept(func() {
+		tradeLogWindow.Hide()
+		m.tradeLogVisible = false // Set the visibility flag
+	})
+
+	return tradeLogWindow
+}
+
 func (m *Manager) createTradeManagerWindowContent() fyne.CanvasObject {
 	m.tradeNewEntry = widget.NewMultiLineEntry()
 	m.tradeNewEntry.Wrapping = fyne.TextWrapWord
@@ -625,6 +692,7 @@ func (m *Manager) ResetTradeManagerWindow() {
 }
 
 func (m *Manager) handleTradeCompleted(args trade.Args) {
+	fmt.Println("handleTradeCompleted called")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -634,22 +702,77 @@ func (m *Manager) handleTradeCompleted(args trade.Args) {
 	}
 
 	var ourOffer, theirOffer trade.Offer
+	var ourName, theirName string
+	var myTotalHC, theirTotalHC float64
 	if m.isCurrentUser(args.Offers[0].Name) {
 		ourOffer = args.Offers[0]
 		theirOffer = args.Offers[1]
+		ourName = args.Offers[0].Name
+		theirName = args.Offers[1].Name
 	} else {
 		ourOffer = args.Offers[1]
 		theirOffer = args.Offers[0]
+		ourName = args.Offers[1].Name
+		theirName = args.Offers[0].Name
+	}
+
+	var myOfferItems, theirOfferItems []string
+	var myOfferItemIDs, theirOfferItemIDs []int
+	var myOfferHCValues, theirOfferHCValues []float64
+
+	// Process our offer
+	for _, item := range ourOffer.Items {
+		enrichedItem := common.EnrichInventoryItem(item)
+		myOfferItems = append(myOfferItems, enrichedItem.Name)
+		myOfferItemIDs = append(myOfferItemIDs, item.ItemId)
+		myOfferHCValues = append(myOfferHCValues, enrichedItem.HCValue)
+		myTotalHC += enrichedItem.HCValue
+	}
+
+	// Process their offer
+	for _, item := range theirOffer.Items {
+		enrichedItem := common.EnrichInventoryItem(item)
+		theirOfferItems = append(theirOfferItems, enrichedItem.Name)
+		theirOfferItemIDs = append(theirOfferItemIDs, item.ItemId)
+		theirOfferHCValues = append(theirOfferHCValues, enrichedItem.HCValue)
+		theirTotalHC += enrichedItem.HCValue
+	}
+
+	// Add received items to our inventory before logging
+	for _, item := range theirOffer.Items {
+		m.unifiedInventory.AddItem(item)
+	}
+
+	// Generate the next trade ID
+	tradeID := len(m.tradeLog) + 1
+
+	// Log the trade internally
+	logEntry := TradeLogEntry{
+		ID:               tradeID,
+		Date:             time.Now().Format("02-01-2006 15:04:05"),
+		Trader:           ourName,
+		Tradee:           theirName,
+		ItemsTraded:      myOfferItems,
+		ItemIDsTraded:    myOfferItemIDs,
+		HCValuesTraded:   myOfferHCValues,
+		ItemsReceived:    theirOfferItems,
+		ItemIDsReceived:  theirOfferItemIDs,
+		HCValuesReceived: theirOfferHCValues,
+	}
+	fmt.Printf("Log Entry: %+v\n", logEntry)
+	m.tradeLogMutex.Lock()
+	m.tradeLog = append(m.tradeLog, logEntry)
+	m.tradeLogMutex.Unlock()
+
+	// If the Trade Log window is open, update it
+	if m.tradeLogVisible {
+		fmt.Println("Updating Trade Log UI")
+		m.updateTradeLogUI()
 	}
 
 	// Remove traded items from our inventory
 	for _, item := range ourOffer.Items {
 		m.unifiedInventory.RemoveItem(item.ItemId)
-	}
-
-	// Add received items to our inventory
-	for _, item := range theirOffer.Items {
-		m.unifiedInventory.AddItem(item)
 	}
 
 	m.ResetTradeManagerContent()
@@ -661,6 +784,56 @@ func (m *Manager) handleTradeCompleted(args trade.Args) {
 	m.RefreshInventorySummaryDisplay()
 	m.RefreshInventoryIcons()
 	m.RefreshTradingInventoryDisplay()
+}
+
+func (m *Manager) updateTradeLogUI() {
+	m.tradeLogMutex.Lock()
+	defer m.tradeLogMutex.Unlock()
+
+	var logText strings.Builder
+	// Add header
+	logText.WriteString(fmt.Sprintf("ID\tDate\tTrader\tRecipient\tItem\tItem ID\tHC Value\n"))
+
+	for _, entry := range m.tradeLog {
+		for i := range entry.ItemsTraded {
+			logText.WriteString(fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%d\t%.2f\n",
+				entry.ID, entry.Date, entry.Trader, entry.Tradee,
+				entry.ItemsTraded[i], entry.ItemIDsTraded[i], entry.HCValuesTraded[i]))
+		}
+		for i := range entry.ItemsReceived {
+			logText.WriteString(fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%d\t%.2f\n",
+				entry.ID, entry.Date, entry.Tradee, entry.Trader,
+				entry.ItemsReceived[i], entry.ItemIDsReceived[i], entry.HCValuesReceived[i]))
+		}
+	}
+	m.tradeLogEntry.SetText(logText.String())
+}
+
+func (m *Manager) exportTradeLogToCSV() {
+	var csvContent strings.Builder
+	csvContent.WriteString("ID,Date,Trader,Recipient,Item,Item ID,HC Value\n")
+
+	for _, entry := range m.tradeLog {
+		for i := range entry.ItemsTraded {
+			csvContent.WriteString(fmt.Sprintf("%d,%s,%s,%s,%s,%d,%.2f\n",
+				entry.ID, entry.Date, entry.Trader, entry.Tradee,
+				entry.ItemsTraded[i], entry.ItemIDsTraded[i], entry.HCValuesTraded[i]))
+		}
+		for i := range entry.ItemsReceived {
+			csvContent.WriteString(fmt.Sprintf("%d,%s,%s,%s,%s,%d,%.2f\n",
+				entry.ID, entry.Date, entry.Tradee, entry.Trader,
+				entry.ItemsReceived[i], entry.ItemIDsReceived[i], entry.HCValuesReceived[i]))
+		}
+	}
+
+	// Write to file
+	filename := fmt.Sprintf("trade_log_%s.csv", time.Now().Format("20060102_150405"))
+	err := ioutil.WriteFile(filename, []byte(csvContent.String()), 0644)
+	if err != nil {
+		dialog.ShowError(err, m.tradeLogWindow)
+	} else {
+		dialog.ShowInformation("Export Successful", "Trade log exported successfully.", m.tradeLogWindow)
+	}
 }
 
 func (m *Manager) handleTradeClosed(args trade.Args) {
@@ -680,6 +853,20 @@ func (m *Manager) handleTradeClosed(args trade.Args) {
 
 	m.RefreshInventoryIcons()
 	m.RefreshTradingInventoryDisplay()
+}
+
+func (ui *UnifiedInventory) GetItemByName(name string) *common.EnrichedInventoryItem {
+	ui.mu.RLock()
+	defer ui.mu.RUnlock()
+
+	for _, item := range ui.Items {
+		if item.EnrichedItem.Name == name {
+			fmt.Printf("Found item: %+v\n", item)
+			return &item.EnrichedItem
+		}
+	}
+	fmt.Printf("Item not found: %s\n", name)
+	return nil
 }
 
 func (m *Manager) updateTradeOffers(offers trading.Offers) {

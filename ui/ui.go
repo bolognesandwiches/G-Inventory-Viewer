@@ -134,7 +134,7 @@ func (m *Manager) showQuantityDialogInTradeManager(items []UnifiedItem) {
 
 	dialogContentWrapper := m.createStyledContainerWithButtons(dialogContent, "")
 
-	dialog.ShowCustomConfirm("Add to Trade", "Confirm", "Cancel", dialogContentWrapper,
+	dialog.ShowCustomConfirm("", "Confirm", "Cancel", dialogContentWrapper,
 		func(confirmed bool) {
 			if confirmed {
 				quantity, err := strconv.Atoi(quantityEntry.Text)
@@ -386,6 +386,9 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 func (m *Manager) UpdateInventoryDisplay(items map[int]inventory.Item) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Clear existing items and summary
+	m.unifiedInventory = NewUnifiedInventory()
 
 	for _, item := range items {
 		m.unifiedInventory.AddItem(item)
@@ -1316,7 +1319,12 @@ func NewCustomTabContainer(manager *Manager, items ...string) *CustomTabContaine
 		c.tabs[0].selected = true
 	}
 
-	c.scanButton = newCustomScanButton(loadScanIconInactive(), func() {})
+	c.scanButton = newCustomScanButton(loadScanIconInactive(), func() {
+		manager.summaryText.SetText("") // Clear the summary text
+		if manager.scanCallback != nil {
+			manager.scanCallback()
+		}
+	})
 	c.scanButton.SetActive(false)
 
 	c.Refresh()
@@ -1631,7 +1639,7 @@ func (m *Manager) showTradeConfirmationDialog() {
 			}
 			// If not confirmed, do nothing and return to main UI
 		},
-		m.window,
+		m.tradeManagerWindow, // Anchor to the trade manager window
 	)
 }
 

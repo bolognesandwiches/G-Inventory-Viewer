@@ -108,6 +108,7 @@ type Manager struct {
 	tradeLogVisible            bool
 	tradeManagerPopout         *fyne.Container
 	tradeLogPopout             *fyne.Container
+	roomSummary                *RoomSummary
 }
 
 func NewUnifiedInventory() *UnifiedInventory {
@@ -434,7 +435,39 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 	m.tradeManager.Completed(m.handleTradeCompleted)
 	m.tradeManager.Closed(m.handleTradeClosed)
 
+	m.roomSummary = NewRoomSummary()
+
+	roomManager.ObjectAdded(func(args room.ObjectArgs) {
+		m.AddItemToRoom(args.Object)
+	})
+
+	roomManager.ObjectRemoved(func(args room.ObjectArgs) {
+		m.RemoveItemFromRoom(args.Object.Id)
+	})
+
 	return m
+}
+
+func (m *Manager) AddItemToRoom(item room.Object) {
+	m.roomSummary.mu.Lock()
+	defer m.roomSummary.mu.Unlock()
+	m.roomSummary.Items[item.Id] = item
+	m.UpdateRoomSummaryDisplay()
+}
+
+func (m *Manager) RemoveItemFromRoom(itemId int) {
+	m.roomSummary.mu.Lock()
+	defer m.roomSummary.mu.Unlock()
+	delete(m.roomSummary.Items, itemId)
+	m.UpdateRoomSummaryDisplay()
+}
+
+func (m *Manager) UpdateRoomSummaryDisplay() {
+	// Update the room summary display in the UI
+	// This will depend on how you're currently displaying the room summary
+	// For example:
+	summary := common.GetRoomSummary(m.roomSummary.Items, nil)
+	m.roomSummaryText.SetText(summary)
 }
 
 func (m *Manager) handleInitialInventoryUpdate(items map[int]inventory.Item) {
@@ -1073,6 +1106,17 @@ func (m *Manager) RefreshTradeManagerWindow() {
 	}
 }
 
+type RoomSummary struct {
+	Items map[int]room.Object
+	mu    sync.RWMutex
+}
+
+func NewRoomSummary() *RoomSummary {
+	return &RoomSummary{
+		Items: make(map[int]room.Object),
+	}
+}
+
 func (m *Manager) isCurrentUser(name string) bool {
 	return m.profileManager.Profile.Name == name
 }
@@ -1081,6 +1125,12 @@ func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]r
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Update the room summary
+	m.roomSummary.mu.Lock()
+	m.roomSummary.Items = objects
+	m.roomSummary.mu.Unlock()
+
+	// Update the room summary text
 	m.roomSummaryText.SetText(common.GetRoomSummary(objects, items))
 
 	// Clear and repopulate room icons

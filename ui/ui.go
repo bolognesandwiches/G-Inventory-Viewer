@@ -98,7 +98,7 @@ type Manager struct {
 	yourTradeOffer             map[string]int
 	theirTradeOffer            map[string]int
 	unifiedInventory           *UnifiedInventory
-	inventoryWindow            fyne.Window
+	inventoryPopout            *fyne.Container // Changed from inventoryWindow to inventoryPopout
 	tradeManagerWindow         fyne.Window
 	quantityDialog             *dialog.CustomDialog
 	tradeLog                   []TradeLogEntry
@@ -106,6 +106,8 @@ type Manager struct {
 	tradeLogWindow             fyne.Window
 	tradeLogEntry              *widget.Entry
 	tradeLogVisible            bool
+	tradeManagerPopout         *fyne.Container
+	tradeLogPopout             *fyne.Container
 }
 
 func NewUnifiedInventory() *UnifiedInventory {
@@ -118,7 +120,7 @@ func NewUnifiedInventory() *UnifiedInventory {
 }
 
 func (m *Manager) showQuantityDialogInTradeManager(items []UnifiedItem) {
-	if len(items) == 0 || m.tradeManagerWindow == nil {
+	if len(items) == 0 || m.tradeManagerPopout == nil {
 		return
 	}
 
@@ -144,12 +146,12 @@ func (m *Manager) showQuantityDialogInTradeManager(items []UnifiedItem) {
 			if confirmed {
 				quantity, err := strconv.Atoi(quantityEntry.Text)
 				if err != nil || quantity <= 0 || quantity > maxQuantity {
-					dialog.ShowError(errors.New("Please enter a valid number between 1 and "+strconv.Itoa(maxQuantity)), m.tradeManagerWindow)
+					dialog.ShowError(errors.New("Please enter a valid number between 1 and "+strconv.Itoa(maxQuantity)), m.window)
 					return
 				}
 				m.addItemsToTrade(items, quantity)
 
-				progress := dialog.NewProgress("Adding Items", "Adding items to trade...", m.tradeManagerWindow)
+				progress := dialog.NewProgress("Adding Items", "Adding items to trade...", m.window)
 				go func() {
 					for i := 0; i < quantity; i++ {
 						progress.SetValue(float64(i+1) / float64(quantity))
@@ -159,57 +161,8 @@ func (m *Manager) showQuantityDialogInTradeManager(items []UnifiedItem) {
 				}()
 			}
 		},
-		m.tradeManagerWindow,
+		m.window, // Use main window as the parent
 	)
-}
-
-func (m *Manager) createTradeManagerWindow() fyne.Window {
-	tradeWindow := m.app.NewWindow("Trade Manager")
-	tradeWindow.SetIcon(m.window.Icon())
-
-	m.tradeNewEntry = widget.NewMultiLineEntry()
-	m.tradeNewEntry.Wrapping = fyne.TextWrapWord
-	m.tradeNewEntry.SetPlaceHolder("Awaiting trade...")
-	m.tradeNewEntry.SetMinRowsVisible(8)
-
-	tradeSummaryContainer := m.createStyledMultiLineEntryContainer(m.tradeNewEntry, "Trade Summary")
-
-	m.tradeOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
-	m.otherOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
-
-	tradeOfferScroll := m.createStyledScrollContainer(m.tradeOfferContainer, "Your Offer")
-	otherOfferScroll := m.createStyledScrollContainer(m.otherOfferContainer, "Their Offer")
-
-	m.tradeAcceptButton = widget.NewButton("Accept Trade", func() {
-		m.showTradeConfirmationDialog()
-	})
-
-	tradeLogButton := widget.NewButton("Trade Log", func() {
-		m.ShowTradeLogWindow()
-	})
-
-	actionButtonContainer := container.NewHBox(
-		layout.NewSpacer(),
-		m.tradeAcceptButton,
-		tradeLogButton,
-		layout.NewSpacer(),
-	)
-
-	content := container.NewVBox(
-		tradeSummaryContainer,
-		tradeOfferScroll,
-		otherOfferScroll,
-		actionButtonContainer,
-	)
-
-	tradeWindow.SetContent(content)
-	tradeWindow.Resize(fyne.NewSize(400, 600))
-
-	tradeWindow.SetCloseIntercept(func() {
-		tradeWindow.Hide()
-	})
-
-	return tradeWindow
 }
 
 type TradeLogEntry struct {
@@ -225,47 +178,75 @@ type TradeLogEntry struct {
 	HCValuesReceived []float64
 }
 
-func (m *Manager) ShowTradeLogWindow() {
-	if m.tradeLogWindow == nil {
-		m.tradeLogWindow = m.createTradeLogWindow()
+func (m *Manager) ToggleTradeLogPopout() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.tradeLogPopout.Visible() {
+		m.tradeLogPopout.Hide()
+		m.window.Resize(fyne.NewSize(800, 600)) // Resize to original state when hidden
+	} else {
+		m.tradeLogPopout.Show()
+		m.window.Resize(fyne.NewSize(800, 800)) // Resize to show the trade log popout
+		m.updateTradeLogUI()                    // Update the trade log UI when showing the popout
 	}
-	m.updateTradeLogUI()
-	m.tradeLogWindow.Show()
-	m.tradeLogVisible = true // Set the visibility flag
+	m.window.Content().Refresh()
 }
+func (m *Manager) setupInventoryTab() *fyne.Container {
+	m.inventoryText = widget.NewMultiLineEntry()
+	m.inventoryText.Wrapping = fyne.TextWrapWord
+	m.inventoryText.SetPlaceHolder("Open your Inventory and then click on Item icons to view more information.")
+	m.inventoryText.SetMinRowsVisible(10)
 
-func (m *Manager) createTradeLogWindow() fyne.Window {
-	tradeLogWindow := m.app.NewWindow("Trade Log")
-	tradeLogWindow.SetIcon(m.window.Icon())
+	m.summaryText = widget.NewMultiLineEntry()
+	m.summaryText.Wrapping = fyne.TextWrapWord
+	m.summaryText.SetPlaceHolder("Click on 'Scan' to begin scanning your inventory!")
+	m.summaryText.SetMinRowsVisible(10)
 
-	m.tradeLogEntry = widget.NewMultiLineEntry()
-	m.tradeLogEntry.Wrapping = fyne.TextWrapWord
-	m.tradeLogEntry.SetPlaceHolder("Trade Log")
-	m.tradeLogEntry.SetMinRowsVisible(40)
-
-	// Set the font to a monospaced font for consistent alignment
-	m.tradeLogEntry.TextStyle = fyne.TextStyle{Monospace: false}
-
-	exportButton := widget.NewButton("Export to CSV", func() {
-		m.exportTradeLogToCSV()
+	openInventoryButton := widget.NewButton("Open Inventory", func() {
+		m.ToggleInventoryPopout() // Changed to toggle the popout instead
 	})
 
-	tradeLogContainer := m.createStyledMultiLineEntryContainer(m.tradeLogEntry, "Trade Log")
+	openTradeManagerButton := widget.NewButton("Open Trade Manager", func() {
+		m.ToggleTradeManagerPopout()
+	})
 
-	content := container.NewVBox(
-		tradeLogContainer,
-		exportButton,
+	openTradeLogButton := widget.NewButton("Open Trade Log", func() {
+		m.ToggleTradeLogPopout()
+	})
+
+	summaryContainer := m.createStyledMultiLineEntryContainer(m.summaryText, "Inventory Summary")
+	idContainer := m.createStyledMultiLineEntryContainer(m.inventoryText, "Item Details")
+
+	buttonsContainer := container.NewVBox(
+		openInventoryButton,
+		openTradeManagerButton,
+		openTradeLogButton,
 	)
 
-	tradeLogWindow.SetContent(content)
-	tradeLogWindow.Resize(fyne.NewSize(600, 400))
+	mainContainer := container.NewVBox(
+		summaryContainer,
+		idContainer,
+		buttonsContainer,
+	)
 
-	tradeLogWindow.SetCloseIntercept(func() {
-		tradeLogWindow.Hide()
-		m.tradeLogVisible = false // Set the visibility flag
-	})
+	// Create the trade log popout container and hide it initially
+	m.tradeLogPopout = m.createTradeLogContent()
+	m.tradeLogPopout.Hide()
 
-	return tradeLogWindow
+	return container.NewBorder(
+		mainContainer,
+		m.tradeLogPopout,
+		nil,
+		nil,
+	)
+}
+
+func (m *Manager) ShowTradeLogWindow() {
+	if m.tradeLogPopout == nil {
+		m.tradeLogPopout = m.createTradeLogContent()
+	}
+	m.ToggleTradeLogPopout()
 }
 
 func (m *Manager) createTradeManagerWindowContent() fyne.CanvasObject {
@@ -301,41 +282,27 @@ func (m *Manager) createTradeManagerWindowContent() fyne.CanvasObject {
 }
 
 func (m *Manager) ShowTradeManagerWindow() {
-	if m.tradeManagerWindow == nil {
-		m.tradeManagerWindow = m.createTradeManagerWindow()
+	if m.tradeManagerPopout == nil {
+		m.tradeManagerPopout = m.createTradeManagerContent()
 	}
-	m.tradeManagerWindow.Show()
-}
-func (m *Manager) setupInventoryTab() *fyne.Container {
-	m.inventoryText = widget.NewMultiLineEntry()
-	m.inventoryText.Wrapping = fyne.TextWrapWord
-	m.inventoryText.SetPlaceHolder("Open your Inventory and then click on Item icons to view more information.")
-	m.inventoryText.SetMinRowsVisible(10)
-
-	m.summaryText = widget.NewMultiLineEntry()
-	m.summaryText.Wrapping = fyne.TextWrapWord
-	m.summaryText.SetPlaceHolder("Click on 'Scan' to begin scanning your inventory!")
-	m.summaryText.SetMinRowsVisible(10)
-
-	openInventoryButton := widget.NewButton("Open Inventory", func() {
-		m.ShowInventoryWindow()
-	})
-
-	openTradeManagerButton := widget.NewButton("Open Trade Manager", func() {
-		m.ShowTradeManagerWindow()
-	})
-
-	summaryContainer := m.createStyledMultiLineEntryContainer(m.summaryText, "Inventory Summary")
-	idContainer := m.createStyledMultiLineEntryContainer(m.inventoryText, "Item Details")
-
-	return container.NewVBox(
-		summaryContainer,
-		idContainer,
-		openInventoryButton,
-		openTradeManagerButton,
-	)
+	if !m.tradeManagerPopout.Visible() { // Only toggle if it's not already visible
+		m.ToggleTradeManagerPopout()
+	}
 }
 
+func (m *Manager) ToggleTradeManagerPopout() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.tradeManagerPopout.Visible() {
+		m.tradeManagerPopout.Hide()
+		m.window.Resize(fyne.NewSize(800, 600)) // Resize to original state when hidden
+	} else {
+		m.tradeManagerPopout.Show()
+		m.window.Resize(fyne.NewSize(1000, 600)) // Resize to show the trade manager popout
+	}
+	m.window.Content().Refresh()
+}
 func (ui *UnifiedInventory) AddItem(item inventory.Item) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
@@ -645,21 +612,27 @@ func (m *Manager) handleTradeAccepted(args trade.AcceptArgs) {
 }
 
 func (m *Manager) ResetTradeManagerContent() {
-	if m.tradeManagerWindow == nil {
-		return
+	if m.tradeOfferContainer != nil {
+		m.tradeOfferContainer.Objects = nil
+		m.tradeOfferContainer.Refresh()
 	}
-
-	m.tradeOfferContainer.Objects = nil
-	m.otherOfferContainer.Objects = nil
+	if m.otherOfferContainer != nil {
+		m.otherOfferContainer.Objects = nil
+		m.otherOfferContainer.Refresh()
+	}
 	m.yourTradeOffer = make(map[string]int)
 	m.theirTradeOffer = make(map[string]int)
 
-	m.tradeNewEntry.SetText("")
-	m.tradeAcceptButton.Enable()
+	if m.tradeNewEntry != nil {
+		m.tradeNewEntry.SetText("")
+	}
+	if m.tradeAcceptButton != nil {
+		m.tradeAcceptButton.Disable() // Explicitly disable the accept trade button
+	}
 
-	m.tradeOfferContainer.Refresh()
-	m.otherOfferContainer.Refresh()
-	m.tradeManagerWindow.Content().Refresh()
+	if m.tradeManagerPopout != nil {
+		m.tradeManagerPopout.Refresh()
+	}
 }
 
 func (m *Manager) ResetTradeManagerWindow() {
@@ -768,9 +741,8 @@ func (m *Manager) handleTradeCompleted(args trade.Args) {
 	m.tradeLog = append(m.tradeLog, logEntry)
 	m.tradeLogMutex.Unlock()
 
-	// If the Trade Log window is open, update it
-	if m.tradeLogVisible {
-
+	// If the Trade Log popout is open, update it
+	if m.tradeLogPopout.Visible() {
 		m.updateTradeLogUI()
 	}
 
@@ -788,6 +760,39 @@ func (m *Manager) handleTradeCompleted(args trade.Args) {
 	m.RefreshInventorySummaryDisplay()
 	m.RefreshInventoryIcons()
 	m.RefreshTradingInventoryDisplay()
+
+	if m.tradeAcceptButton != nil {
+		m.tradeAcceptButton.Enable() // Re-enable the accept trade button after trade completion
+	}
+
+	m.tradeManagerPopout.Hide() // Hide the trade manager popout when the trade is completed
+	m.window.Content().Refresh()
+}
+
+func (m *Manager) handleTradeClosed(args trade.Args) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Reset trade status for all items
+	for itemId := range m.unifiedInventory.Items {
+		m.unifiedInventory.UpdateItemTradeStatus(itemId, false)
+	}
+
+	m.ResetTradeManagerContent()
+
+	if m.tradeNewEntry != nil {
+		m.tradeNewEntry.SetText("Trade window closed. Awaiting Trade...")
+	}
+
+	m.RefreshInventoryIcons()
+	m.RefreshTradingInventoryDisplay()
+
+	if m.tradeAcceptButton != nil {
+		m.tradeAcceptButton.Enable() // Re-enable the accept trade button after trade closure
+	}
+
+	m.tradeManagerPopout.Hide() // Hide the trade manager popout when the trade is closed
+	m.window.Content().Refresh()
 }
 
 func (m *Manager) updateTradeLogUI() {
@@ -811,6 +816,7 @@ func (m *Manager) updateTradeLogUI() {
 		}
 	}
 	m.tradeLogEntry.SetText(logText.String())
+	m.tradeLogEntry.Refresh() // Ensure the entry widget is refreshed
 }
 
 func (m *Manager) exportTradeLogToCSV() {
@@ -834,29 +840,10 @@ func (m *Manager) exportTradeLogToCSV() {
 	filename := fmt.Sprintf("trade_log_%s.csv", time.Now().Format("20060102_150405"))
 	err := ioutil.WriteFile(filename, []byte(csvContent.String()), 0644)
 	if err != nil {
-		dialog.ShowError(err, m.tradeLogWindow)
+		dialog.ShowError(err, m.window) // Ensure the dialog is anchored to a window
 	} else {
-		dialog.ShowInformation("Export Successful", "Trade log exported successfully.", m.tradeLogWindow)
+		dialog.ShowInformation("Export Successful", "Trade log exported successfully.", m.window) // Ensure the dialog is anchored to a window
 	}
-}
-
-func (m *Manager) handleTradeClosed(args trade.Args) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Reset trade status for all items
-	for itemId := range m.unifiedInventory.Items {
-		m.unifiedInventory.UpdateItemTradeStatus(itemId, false)
-	}
-
-	m.ResetTradeManagerContent()
-
-	if m.tradeNewEntry != nil {
-		m.tradeNewEntry.SetText("Trade window closed. Awaiting Trade...")
-	}
-
-	m.RefreshInventoryIcons()
-	m.RefreshTradingInventoryDisplay()
 }
 
 func (ui *UnifiedInventory) GetItemByName(name string) *common.EnrichedInventoryItem {
@@ -869,6 +856,33 @@ func (ui *UnifiedInventory) GetItemByName(name string) *common.EnrichedInventory
 		}
 	}
 	return nil
+}
+
+func (m *Manager) createTradeLogContent() *fyne.Container {
+	m.tradeLogEntry = widget.NewMultiLineEntry()
+	m.tradeLogEntry.Wrapping = fyne.TextWrapWord
+	m.tradeLogEntry.SetPlaceHolder("Trade Log")
+	m.tradeLogEntry.SetMinRowsVisible(40)
+
+	// Set the font to a monospaced font for consistent alignment
+	m.tradeLogEntry.TextStyle = fyne.TextStyle{Monospace: false}
+
+	exportButton := widget.NewButton("Export to CSV", func() {
+		m.exportTradeLogToCSV()
+	})
+
+	tradeLogContainer := m.createStyledMultiLineEntryContainer(m.tradeLogEntry, "Trade Log")
+
+	content := container.NewVBox(
+		tradeLogContainer,
+		exportButton,
+	)
+
+	popout := container.NewVBox(
+		content,
+	)
+	popout.Hide() // Ensure it's hidden initially
+	return popout
 }
 
 func (m *Manager) updateTradeOffers(offers trading.Offers) {
@@ -937,8 +951,12 @@ func (m *Manager) updateTradeOffers(offers trading.Offers) {
 		m.tradeNewEntry.SetText(summary.String())
 	}
 
-	if m.tradeManagerWindow != nil {
-		m.tradeManagerWindow.Content().Refresh()
+	if m.tradeAcceptButton != nil && m.tradeManagerPopout.Visible() {
+		m.tradeAcceptButton.Enable()
+	}
+
+	if m.tradeManagerPopout != nil {
+		m.tradeManagerPopout.Refresh()
 	}
 }
 
@@ -1032,7 +1050,7 @@ func (m *Manager) Run() {
 	m.app = app.New()
 	customTheme := &habboTheme{}
 	m.app.Settings().SetTheme(customTheme)
-	icon, _ := m.loadImage("app_icon.ico")
+	icon, _ := m.loadImage("app_icon.ico") // Ensure icon is defined here
 	m.app.SetIcon(icon)
 	m.window = m.app.NewWindow("G-itemViewer")
 	m.mu.Unlock()
@@ -1096,11 +1114,117 @@ func (m *Manager) Run() {
 		content,
 	)
 
-	m.window.SetContent(mainContainer)
-	m.window.Resize(fyne.NewSize(275, 300))
+	// Create the inventory popout container and hide it initially
+	m.inventoryPopout = m.createInventoryContent()
+	m.inventoryPopout.Hide()
+
+	// Create the trade manager popout container and hide it initially
+	m.tradeManagerPopout = m.createTradeManagerContent()
+	m.tradeManagerPopout.Hide()
+
+	// Use a split container for the main content and side popouts
+	sidePopouts := container.NewVBox(
+		m.inventoryPopout,
+		m.tradeManagerPopout,
+	)
+	sideSplit := container.NewHSplit(mainContainer, sidePopouts)
+	sideSplit.Offset = 0.75
+
+	m.window.SetContent(sideSplit)
+	m.window.Resize(fyne.NewSize(1200, 800))
 	m.window.SetPadded(true)
 
 	m.window.ShowAndRun()
+}
+
+func (m *Manager) createTradeManagerContent() *fyne.Container {
+	// Initialize containers if they are nil
+	if m.tradeOfferContainer == nil {
+		m.tradeOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
+	}
+	if m.otherOfferContainer == nil {
+		m.otherOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
+	}
+
+	// Create the trade summary entry
+	m.tradeNewEntry = widget.NewMultiLineEntry()
+	m.tradeNewEntry.Wrapping = fyne.TextWrapWord
+	m.tradeNewEntry.SetPlaceHolder("Awaiting trade...")
+	m.tradeNewEntry.SetMinRowsVisible(8)
+
+	// Create a container for the trade summary
+	tradeSummaryContainer := m.createStyledMultiLineEntryContainer(m.tradeNewEntry, "Trade Summary")
+
+	// Create styled scroll containers for trade offers
+	tradeOfferScroll := m.createStyledScrollContainer(m.tradeOfferContainer, "Your Offer")
+	otherOfferScroll := m.createStyledScrollContainer(m.otherOfferContainer, "Their Offer")
+
+	// Initialize buttons
+	m.tradeAcceptButton = widget.NewButton("Accept Trade", func() {
+		m.showTradeConfirmationDialog()
+	})
+
+	tradeLogButton := widget.NewButton("Trade Log", func() {
+		m.ShowTradeLogWindow()
+	})
+
+	actionButtonContainer := container.NewHBox(
+		layout.NewSpacer(),
+		m.tradeAcceptButton,
+		tradeLogButton,
+		layout.NewSpacer(),
+	)
+
+	// Create the main content container for the trade manager
+	content := container.NewVBox(
+		tradeSummaryContainer,
+		tradeOfferScroll,
+		otherOfferScroll,
+		actionButtonContainer,
+	)
+
+	// Style the container
+	styledContainer := m.createStyledContainerWithButtons(content, "Trade Manager")
+
+	// Create the popout container
+	popout := container.NewVBox(
+		styledContainer,
+	)
+
+	popout.Hide() // Ensure it's hidden initially
+	return popout
+}
+
+func (m *Manager) ToggleInventoryPopout() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.inventoryPopout.Visible() {
+		m.inventoryPopout.Hide()
+		m.window.Resize(fyne.NewSize(800, 600)) // Resize to original state when hidden
+	} else {
+		m.inventoryPopout.Show()
+		m.window.Resize(fyne.NewSize(1000, 600)) // Resize to show the inventory popout
+	}
+	m.window.Content().Refresh()
+}
+
+func (m *Manager) createInventoryContent() *fyne.Container {
+	if m.iconContainer == nil {
+		m.iconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
+	}
+
+	itemsScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.iconContainer))))
+	itemsScroll.SetMinSize(fyne.NewSize(36, 36*8)) // Set the minimum rows visible to 30
+
+	styledContainer := m.createStyledContainerWithButtons(itemsScroll, "Inventory Items")
+
+	popout := container.NewVBox(
+		styledContainer,
+	)
+
+	popout.Hide() // Ensure it's hidden initially
+	return popout
 }
 
 func (m *Manager) ShowWindow() {
@@ -1321,10 +1445,11 @@ func (m *Manager) createInventoryWindow() fyne.Window {
 func (m *Manager) ShowInventoryWindow() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.inventoryWindow == nil {
-		m.inventoryWindow = m.createInventoryWindow()
+	if m.inventoryPopout == nil {
+		m.inventoryPopout = m.createInventoryContent()
 	}
-	m.inventoryWindow.Show()
+	m.inventoryPopout.Show()
+	m.window.Content().Refresh()
 }
 
 func (m *Manager) addObjectIcon(obj room.Object) {
@@ -1828,7 +1953,7 @@ func (m *Manager) showTradeConfirmationDialog() {
 			}
 			// If not confirmed, do nothing and return to main UI
 		},
-		m.tradeManagerWindow, // Anchor to the trade manager window
+		m.window, // Use main window as the parent
 	)
 }
 

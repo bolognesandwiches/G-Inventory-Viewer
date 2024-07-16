@@ -406,6 +406,26 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 		iconContainer:     container.NewGridWrap(fyne.NewSize(36, 36)), // Ensure this is initialized
 	}
 
+	// Register handlers for inventory changes
+	invManager.Updated(func() {
+		currentItems := invManager.Items()
+		if len(m.unifiedInventory.Items) == 0 {
+			// Initial scan
+			m.handleInitialInventoryUpdate(currentItems)
+		} else {
+			// Check for new items (pickups)
+			for id, item := range currentItems {
+				if !m.unifiedInventory.ItemExists(id) {
+					m.HandleItemAddition(item)
+				}
+			}
+		}
+	})
+
+	invManager.ItemRemoved(func(args inventory.ItemArgs) {
+		m.HandleItemRemoval(args.Item)
+	})
+
 	pickupManager.SetOnItemPickedUp(m.UpdateRoomDisplayAfterPickup)
 
 	// Register trade event handlers
@@ -415,6 +435,58 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 	m.tradeManager.Closed(m.handleTradeClosed)
 
 	return m
+}
+
+func (m *Manager) handleInitialInventoryUpdate(items map[int]inventory.Item) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, item := range items {
+		m.unifiedInventory.AddItem(item)
+	}
+	m.RefreshInventorySummaryDisplay()
+	m.RefreshInventoryIcons()
+}
+
+func (ui *UnifiedInventory) ItemExists(itemId int) bool {
+	ui.mu.RLock()
+	defer ui.mu.RUnlock()
+	_, exists := ui.Items[itemId]
+	return exists
+}
+
+func (m *Manager) HandleItemAddition(item inventory.Item) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.unifiedInventory.AddItem(item)
+	m.RefreshInventorySummaryDisplay()
+	m.RefreshInventoryIcons()
+}
+
+func (m *Manager) handleInventoryUpdate(newInventory map[int]inventory.Item) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check for new items (pickups)
+	for id, item := range newInventory {
+		if _, exists := m.unifiedInventory.Items[id]; !exists {
+			m.unifiedInventory.AddItem(item)
+			m.RefreshInventorySummaryDisplay()
+			m.RefreshInventoryIcons()
+		}
+	}
+
+	// We don't need to check for removed items here,
+	// as that's handled by the ItemRemoved event
+}
+func (m *Manager) HandleItemRemoval(item inventory.Item) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.unifiedInventory.RemoveItem(item.ItemId)
+	m.RefreshInventorySummaryDisplay()
+	m.RefreshInventoryIcons()
 }
 
 func (m *Manager) UpdateInventoryDisplay(items map[int]inventory.Item) {

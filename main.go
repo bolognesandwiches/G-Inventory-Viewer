@@ -32,14 +32,8 @@ var (
 	isCounted      = make(map[int]bool)
 	refreshed      bool
 	retrievedItems = make(map[int]inventory.Item)
-	pickupManager  *common.PickupManager
 	profileManager = profile.NewManager(ext)
 )
-
-func init() {
-	pickupManager = common.NewPickupManager(ext, inventoryMgr, nil) // We'll set the callback later in the UI manager
-	SetupPacketLogging(ext)
-}
 
 func startInventoryCount() {
 	lock.Lock()
@@ -103,7 +97,6 @@ func main() {
 		ext,
 		inventoryMgr,
 		roomMgr,
-		pickupManager,
 		startInventoryCount,
 		profileManager,
 	)
@@ -113,16 +106,6 @@ func main() {
 			tickCounter()
 		}
 	}()
-
-	roomMgr.ObjectsLoaded(func(args room.ObjectsArgs) {
-		pickupManager.UpdateRoomInfo(roomMgr.Objects, roomMgr.Items)
-		go uiManager.UpdateRoomDisplay(roomMgr.Objects, roomMgr.Items)
-	})
-
-	roomMgr.ItemsLoaded(func(args room.ItemsArgs) {
-		pickupManager.UpdateRoomInfo(roomMgr.Objects, roomMgr.Items)
-		go uiManager.UpdateRoomDisplay(roomMgr.Objects, roomMgr.Items)
-	})
 
 	ext.Connected(func(args g.ConnectArgs) {
 		go assetManager.LoadAssets(args.Host)

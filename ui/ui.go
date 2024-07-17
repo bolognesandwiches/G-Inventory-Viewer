@@ -1,11 +1,15 @@
 package ui
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"image/color"
+	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +27,7 @@ import (
 	"github.com/bolognesandwiches/G-Inventory-Viewer/trading"
 	g "xabbo.b7c.io/goearth"
 	"xabbo.b7c.io/goearth/shockwave/inventory"
+	"xabbo.b7c.io/goearth/shockwave/out"
 	"xabbo.b7c.io/goearth/shockwave/profile"
 	"xabbo.b7c.io/goearth/shockwave/room"
 	"xabbo.b7c.io/goearth/shockwave/trade"
@@ -68,6 +73,8 @@ type Manager struct {
 	summaryText                *widget.Entry
 	iconContainer              *fyne.Container
 	itemsEntry                 *widget.Entry
+	roomMutex                  sync.RWMutex
+	roomItems                  map[int]room.Item
 	roomText                   *widget.Entry
 	roomSummaryText            *widget.Entry
 	roomIconContainer          *fyne.Container
@@ -84,11 +91,10 @@ type Manager struct {
 	mu                         sync.Mutex
 	scanButton                 *customScanButton
 	discordButton              *customScanButton
-	roomActionButton           *customPickupButton
+	roomActionButton           *widget.Button
 	tradeAcceptButton          *widget.Button
 	scanCallback               func()
 	inventorySummaryForDiscord string
-	pickupManager              *common.PickupManager
 	updateRoomDisplayFunc      func(map[int]room.Object, map[int]room.Item)
 	UpdateRoomDisplayLock      sync.Mutex
 	ext                        *g.Ext
@@ -109,6 +115,9 @@ type Manager struct {
 	tradeManagerPopout         *fyne.Container
 	tradeLogPopout             *fyne.Container
 	roomSummary                *RoomSummary
+	roomDuplicatorPopout       *fyne.Container
+	currentCapture             *RoomCapture
+	inventoryReportEntry       *widget.Entry
 }
 
 func NewUnifiedInventory() *UnifiedInventory {
@@ -390,14 +399,13 @@ func (ui *UnifiedInventory) GetSummary() InventorySummary {
 	return ui.Summary
 }
 
-func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomManager *room.Manager, pickupManager *common.PickupManager, scanCallback func(), profileManager *profile.Manager) *Manager {
+func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomManager *room.Manager, scanCallback func(), profileManager *profile.Manager) *Manager {
 	m := &Manager{
 		app:               app,
 		ext:               ext,
 		inventoryManager:  invManager,
 		roomManager:       roomManager,
 		scanCallback:      scanCallback,
-		pickupManager:     pickupManager,
 		profileManager:    profileManager,
 		tradeManager:      trading.NewManager(ext, profileManager, invManager),
 		tradeNewContainer: container.NewGridWrap(fyne.NewSize(36, 36)),
@@ -427,8 +435,6 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 		m.HandleItemRemoval(args.Item)
 	})
 
-	pickupManager.SetOnItemPickedUp(m.UpdateRoomDisplayAfterPickup)
-
 	// Register trade event handlers
 	m.tradeManager.Updated(m.handleTradeUpdated)
 	m.tradeManager.Accepted(m.handleTradeAccepted)
@@ -445,9 +451,18 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 		m.RemoveItemFromRoom(args.Object.Id)
 	})
 
+	roomManager.ObjectsLoaded(func(args room.ObjectsArgs) {
+		log.Println("ObjectsLoaded event triggered")
+		go m.updateRoomDisplayFunc(roomManager.Objects, roomManager.Items)
+	})
+
+	roomManager.ItemsLoaded(func(args room.ItemsArgs) {
+		log.Println("ItemsLoaded event triggered")
+		go m.updateRoomDisplayFunc(roomManager.Objects, roomManager.Items)
+	})
+
 	return m
 }
-
 func (m *Manager) AddItemToRoom(item room.Object) {
 	m.roomSummary.mu.Lock()
 	defer m.roomSummary.mu.Unlock()
@@ -1125,35 +1140,9 @@ func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]r
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Update the room summary
 	m.roomSummary.mu.Lock()
 	m.roomSummary.Items = objects
 	m.roomSummary.mu.Unlock()
-
-	// Update the room summary text
-	m.roomSummaryText.SetText(common.GetRoomSummary(objects, items))
-
-	// Clear and repopulate room icons
-	m.roomIconContainer.Objects = nil
-
-	// Repopulate room icons
-	for _, obj := range objects {
-		m.addObjectIcon(obj)
-	}
-	for _, item := range items {
-		m.addItemIcon(item)
-	}
-	m.roomIconContainer.Refresh()
-
-	// Update room item IDs
-	var itemIDs strings.Builder
-	for id := range objects {
-		itemIDs.WriteString(fmt.Sprintf("%d\n", id))
-	}
-	for id := range items {
-		itemIDs.WriteString(fmt.Sprintf("%d\n", id))
-	}
-	m.roomText.SetText(itemIDs.String())
 
 	if m.updateRoomDisplayFunc != nil {
 		m.updateRoomDisplayFunc(objects, items)
@@ -1172,7 +1161,7 @@ func (m *Manager) Run() {
 	m.app = app.New()
 	customTheme := &habboTheme{}
 	m.app.Settings().SetTheme(customTheme)
-	icon, _ := m.loadImage("app_icon.ico") // Ensure icon is defined here
+	icon, _ := m.loadImage("app_icon.ico")
 	m.app.SetIcon(icon)
 	m.window = m.app.NewWindow("G-itemViewer")
 	m.mu.Unlock()
@@ -1236,18 +1225,19 @@ func (m *Manager) Run() {
 		content,
 	)
 
-	// Create the inventory popout container and hide it initially
 	m.inventoryPopout = m.createInventoryContent()
 	m.inventoryPopout.Hide()
 
-	// Create the trade manager popout container and hide it initially
 	m.tradeManagerPopout = m.createTradeManagerContent()
 	m.tradeManagerPopout.Hide()
 
-	// Use a split container for the main content and side popouts
+	m.roomDuplicatorPopout = m.createRoomDuplicatorContent()
+	m.roomDuplicatorPopout.Hide()
+
 	sidePopouts := container.NewVBox(
 		m.inventoryPopout,
 		m.tradeManagerPopout,
+		m.roomDuplicatorPopout,
 	)
 	sideSplit := container.NewHSplit(mainContainer, sidePopouts)
 	sideSplit.Offset = 0.75
@@ -1408,11 +1398,14 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 
 	m.roomIconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
 	roomItemsScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.roomIconContainer))))
-	roomItemsScroll.SetMinSize(fyne.NewSize(0, 125)) // Adjust this value to make it longer vertically
+	roomItemsScroll.SetMinSize(fyne.NewSize(0, 125))
 
 	var selectedItemIds []int
 
 	updateRoomDisplay := func(objects map[int]room.Object, items map[int]room.Item) {
+		m.roomSummary.mu.Lock()
+		defer m.roomSummary.mu.Unlock()
+
 		m.roomIconContainer.Objects = nil
 		enrichedObjects := make(map[string][]common.EnrichedRoomObject)
 		enrichedItems := make(map[string][]common.EnrichedRoomItem)
@@ -1443,7 +1436,7 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 					selectedItemIds = append(selectedItemIds, obj.Id)
 				}
 				m.roomText.SetText(details.String())
-				m.roomActionButton.SetActive(true)
+				m.roomActionButton.Enable()
 			})
 
 			btn.SetIcon(theme.AccountIcon())
@@ -1484,7 +1477,7 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 					selectedItemIds = append(selectedItemIds, item.Id)
 				}
 				m.roomText.SetText(details.String())
-				m.roomActionButton.SetActive(true)
+				m.roomActionButton.Enable()
 			})
 
 			btn.SetIcon(theme.AccountIcon())
@@ -1511,25 +1504,46 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 		}
 
 		m.roomIconContainer.Refresh()
+
+		m.roomSummaryText.SetText(common.GetRoomSummary(objects, items))
+
+		var itemIDs strings.Builder
+		for id := range objects {
+			itemIDs.WriteString(fmt.Sprintf("%d\n", id))
+		}
+		for id := range items {
+			itemIDs.WriteString(fmt.Sprintf("%d\n", id))
+		}
+		m.roomText.SetText(itemIDs.String())
 	}
 
 	roomSummaryContainer := m.createStyledMultiLineEntryContainer(m.roomSummaryText, "Room Summary")
 	roomItemsContainer := m.createStyledContainerWithButtons(roomItemsScroll, "Room Items")
 	roomIdContainer := m.createStyledMultiLineEntryContainer(m.roomText, "Room Item IDs")
 
-	m.roomActionButton = newCustomPickupButton(loadRoomActionIcon(), func() {
+	m.roomActionButton = widget.NewButton("Pick Up Items", func() {
 		if len(selectedItemIds) > 0 {
-			m.roomActionButton.SetActive(true)
 			go func() {
-				m.pickupManager.PickupItems(selectedItemIds, func() {
-					m.roomActionButton.SetActive(false)
+				log.Printf("Pickup button clicked for item IDs: %v\n", selectedItemIds)
+				m.PickupItems(selectedItemIds, func() {
 					m.UpdateRoomDisplayAfterPickup()
 				})
 			}()
 		}
 	})
 
-	actionButtonContainer := container.NewHBox(layout.NewSpacer(), m.roomActionButton, layout.NewSpacer())
+	m.roomActionButton.Disable()
+
+	roomDuplicatorButton := widget.NewButton("Room Duplicator", func() {
+		m.ToggleRoomDuplicatorPopout()
+	})
+
+	actionButtonContainer := container.NewHBox(
+		layout.NewSpacer(),
+		m.roomActionButton,
+		roomDuplicatorButton,
+		layout.NewSpacer(),
+	)
 
 	m.updateRoomDisplayFunc = updateRoomDisplay
 
@@ -1575,11 +1589,63 @@ func (m *Manager) ShowInventoryWindow() {
 }
 
 func (m *Manager) addObjectIcon(obj room.Object) {
-	// Implementation here
+	btn := widget.NewButton("", func() {
+		m.roomText.SetText(common.GetRoomObjectDetails(obj))
+	})
+
+	btn.SetIcon(theme.AccountIcon())
+	btn.Resize(fyne.NewSize(44, 44))
+
+	go func() {
+		enrichedObj := common.EnrichRoomObject(obj)
+		iconURL := enrichedObj.IconURL
+		resp, err := http.Get(iconURL)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+
+		iconData, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return
+		}
+
+		iconResource := fyne.NewStaticResource("icon", iconData)
+		btn.SetIcon(iconResource)
+		btn.Refresh()
+	}()
+
+	m.roomIconContainer.Add(btn)
 }
 
 func (m *Manager) addItemIcon(item room.Item) {
-	// Implementation here
+	btn := widget.NewButton("", func() {
+		m.roomText.SetText(common.GetRoomItemDetails(item))
+	})
+
+	btn.SetIcon(theme.AccountIcon())
+	btn.Resize(fyne.NewSize(44, 44))
+
+	go func() {
+		enrichedItem := common.EnrichRoomItem(item)
+		iconURL := enrichedItem.IconURL
+		resp, err := http.Get(iconURL)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+
+		iconData, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return
+		}
+
+		iconResource := fyne.NewStaticResource("icon", iconData)
+		btn.SetIcon(iconResource)
+		btn.Refresh()
+	}()
+
+	m.roomIconContainer.Add(btn)
 }
 
 func (m *Manager) loadImage(filename string) (fyne.Resource, error) {
@@ -1636,37 +1702,6 @@ func (b *customScanButton) SetActive(active bool) {
 		} else {
 			b.label.SetText("Discord")
 		}
-	}
-	b.Refresh()
-}
-
-type customPickupButton struct {
-	customScanButton
-}
-
-func newCustomPickupButton(icon fyne.Resource, tapped func()) *customPickupButton {
-	button := &customPickupButton{}
-	button.ExtendBaseWidget(button)
-	button.icon = canvas.NewImageFromResource(icon)
-	button.icon.FillMode = canvas.ImageFillOriginal
-	button.label = widget.NewLabel("")
-	button.label.Alignment = fyne.TextAlignLeading
-	button.label.TextStyle = fyne.TextStyle{Bold: true}
-	button.OnTapped = tapped
-	button.Importance = widget.LowImportance
-	button.active = false
-	button.SetActive(false) // Set initial state
-	return button
-}
-
-func (b *customPickupButton) SetActive(active bool) {
-	b.active = active
-	if active {
-		b.icon.Resource = loadScanIconActive()
-		b.label.SetText("Picking up...")
-	} else {
-		b.icon.Resource = loadScanIconInactive()
-		b.label.SetText("Pick up")
 	}
 	b.Refresh()
 }
@@ -2124,4 +2159,490 @@ func (m *Manager) HandleTradeStatus(opened bool) {
 	if opened {
 		m.ShowTradeManagerWindow()
 	}
+}
+
+type RoomCapture struct {
+	FloorItems map[string][]FloorItemInfo
+	WallItems  map[string][]WallItemInfo
+	Timestamp  time.Time
+}
+
+type FloorItemInfo struct {
+	Name      string
+	Width     int
+	Height    int
+	X         int
+	Y         int
+	Direction int
+}
+
+type WallItemInfo struct {
+	Name          string
+	PlacementInfo string
+}
+
+func (m *Manager) CaptureCurrentRoom() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	capture := &RoomCapture{
+		FloorItems: make(map[string][]FloorItemInfo),
+		WallItems:  make(map[string][]WallItemInfo),
+		Timestamp:  time.Now(),
+	}
+
+	m.roomSummary.mu.RLock()
+	defer m.roomSummary.mu.RUnlock()
+
+	for _, obj := range m.roomSummary.Items {
+		enrichedObj := common.EnrichRoomObject(obj)
+		floorInfo := FloorItemInfo{
+			Name:      enrichedObj.Name,
+			Width:     obj.Width,
+			Height:    obj.Height,
+			X:         obj.X,
+			Y:         obj.Y,
+			Direction: obj.Direction,
+		}
+		capture.FloorItems[enrichedObj.Name] = append(capture.FloorItems[enrichedObj.Name], floorInfo)
+	}
+
+	for _, item := range m.roomManager.Items {
+		enrichedItem := common.EnrichRoomItem(item)
+		wallInfo := WallItemInfo{
+			Name:          enrichedItem.Name,
+			PlacementInfo: item.Location,
+		}
+		capture.WallItems[enrichedItem.Name] = append(capture.WallItems[enrichedItem.Name], wallInfo)
+	}
+
+	m.currentCapture = capture
+	dialog.ShowInformation("Room Captured", "The current room layout has been captured.", m.window)
+}
+func (m *Manager) ValidateInventoryForCapture() string {
+	if m.currentCapture == nil {
+		return "No room captured."
+	}
+
+	var report strings.Builder
+	report.WriteString("Inventory Validation Report:\n\n")
+
+	report.WriteString("Floor Items:\n")
+	for itemName, itemInfos := range m.currentCapture.FloorItems {
+		m.writeItemValidation(&report, itemName, len(itemInfos), false)
+	}
+
+	report.WriteString("\nWall Items:\n")
+	for itemName, itemInfos := range m.currentCapture.WallItems {
+		m.writeItemValidation(&report, itemName, len(itemInfos), true)
+	}
+
+	return report.String()
+}
+
+func (m *Manager) writeItemValidation(report *strings.Builder, itemName string, requiredCount int, isWallItem bool) {
+	inventoryCount := m.getInventoryItemCount(itemName, isWallItem)
+
+	report.WriteString(fmt.Sprintf("%s:\n", itemName))
+	report.WriteString(fmt.Sprintf("  Required: %d\n", requiredCount))
+	report.WriteString(fmt.Sprintf("  In Inventory: %d\n", inventoryCount))
+
+	if inventoryCount >= requiredCount {
+		report.WriteString("  Status: ✓ Sufficient\n")
+	} else {
+		report.WriteString(fmt.Sprintf("  Status: ✗ Missing %d\n", requiredCount-inventoryCount))
+	}
+	report.WriteString("\n")
+}
+
+func (m *Manager) getInventoryItemCount(itemName string, isWallItem bool) int {
+	count := 0
+	for _, item := range m.unifiedInventory.Items {
+		enrichedItem := common.EnrichInventoryItem(item.Item)
+		if enrichedItem.Name == itemName && (isWallItem == (item.Item.Type == "I")) {
+			count += item.Quantity
+		}
+	}
+	return count
+}
+
+func (m *Manager) DuplicateRoom(capture *RoomCapture) error {
+	if capture == nil {
+		return errors.New("no room capture available")
+	}
+
+	if !m.canPlaceItemsInCurrentRoom() {
+		return errors.New("cannot place items in the current room")
+	}
+
+	progress := dialog.NewProgress("Duplicating Room", "Placing items...", m.window)
+	progress.Show()
+	defer progress.Hide()
+
+	totalItems := m.getTotalItemCount(capture)
+	placedItems := 0
+
+	// Place "Petal Patch" first if it exists
+	if petalPatches, exists := capture.FloorItems["Petal Patch"]; exists {
+		for _, info := range petalPatches {
+			if !m.placeItem("Petal Patch", false, info) {
+				break
+			}
+			placedItems++
+			progress.SetValue(float64(placedItems) / float64(totalItems))
+		}
+		delete(capture.FloorItems, "Petal Patch")
+	}
+
+	// Place remaining floor items
+	for itemName, itemInfos := range capture.FloorItems {
+		for _, info := range itemInfos {
+			if !m.placeItem(itemName, false, info) {
+				break
+			}
+			placedItems++
+			progress.SetValue(float64(placedItems) / float64(totalItems))
+		}
+	}
+
+	// Place wall items
+	for itemName, itemInfos := range capture.WallItems {
+		for _, info := range itemInfos {
+			if !m.placeItem(itemName, true, info) {
+				break
+			}
+			placedItems++
+			progress.SetValue(float64(placedItems) / float64(totalItems))
+		}
+	}
+
+	if placedItems < totalItems {
+		return fmt.Errorf("ran out of items, placed %d out of %d", placedItems, totalItems)
+	}
+
+	return nil
+}
+
+func (m *Manager) getTotalItemCount(capture *RoomCapture) int {
+	total := 0
+	for _, itemInfos := range capture.FloorItems {
+		total += len(itemInfos)
+	}
+	for _, itemInfos := range capture.WallItems {
+		total += len(itemInfos)
+	}
+	return total
+}
+
+func (m *Manager) placeItem(itemName string, isWallItem bool, info interface{}) bool {
+	var itemToPlace *inventory.Item
+	var itemId int
+	for id, unifiedItem := range m.unifiedInventory.Items {
+		enrichedItem := common.EnrichInventoryItem(unifiedItem.Item)
+		if enrichedItem.Name == itemName && (isWallItem == (unifiedItem.Item.Type == "I")) {
+			itemToPlace = &unifiedItem.Item
+			itemId = id
+			break
+		}
+	}
+
+	if itemToPlace == nil {
+		log.Printf("Item not found in inventory: %s", itemName)
+		return false
+	}
+
+	var packetData string
+
+	if isWallItem {
+		wallInfo := info.(WallItemInfo)
+		packetData = fmt.Sprintf("%d %s", itemToPlace.ItemId, wallInfo.PlacementInfo)
+	} else {
+		floorInfo := info.(FloorItemInfo)
+		packetData = fmt.Sprintf("%d %d %d %d %d %d", itemToPlace.ItemId, floorInfo.X, floorInfo.Y, floorInfo.Width, floorInfo.Height, floorInfo.Direction)
+	}
+
+	// Send the packet using PLACESTUFF for both wall and floor items
+	m.ext.Send(out.PLACESTUFF, []byte(packetData))
+
+	log.Printf("Sent PLACESTUFF packet: %s", packetData)
+
+	// Remove the item from the unified inventory
+	m.unifiedInventory.RemoveItem(itemId)
+
+	// Increase delay to 600ms
+	time.Sleep(600 * time.Millisecond)
+
+	return true
+}
+
+func (m *Manager) PickupItems(itemIds []int, onComplete func()) {
+	log.Println("Starting PickupItems")
+	log.Printf("Items to pick up: %v", itemIds)
+
+	for _, id := range itemIds {
+		log.Printf("Attempting to pick up item %d", id)
+
+		var packetData string
+		var isFloorItem bool
+
+		if _, exists := m.roomManager.Objects[id]; exists {
+			packetData = fmt.Sprintf("new stuff %d", id)
+			delete(m.roomManager.Objects, id)
+			isFloorItem = true
+		} else if _, exists := m.roomManager.Items[id]; exists {
+			packetData = fmt.Sprintf("new item %d", id)
+			delete(m.roomManager.Items, id)
+			isFloorItem = false
+		} else {
+			log.Printf("Item ID %d not found in room objects or items", id)
+			continue
+		}
+
+		// Send the packet using ADDSTRIPITEM for both wall and floor items
+		m.ext.Send(out.ADDSTRIPITEM, []byte(packetData))
+		log.Printf("Sent ADDSTRIPITEM packet: %s", packetData)
+
+		// Create a placeholder inventory item
+		// You might need to adjust this based on your actual inventory item structure
+		newItem := inventory.Item{
+			ItemId: id,
+			Type:   inventory.ItemType(map[bool]string{true: "S", false: "I"}[isFloorItem]),
+		}
+
+		// Add the item to the unified inventory
+		m.unifiedInventory.AddItem(newItem)
+
+		// Increase delay to 600ms to match placeItem
+		time.Sleep(600 * time.Millisecond)
+	}
+
+	log.Println("Pickup process completed")
+	if onComplete != nil {
+		log.Println("Calling onComplete callback")
+		onComplete()
+	}
+
+	m.RefreshInventorySummaryDisplay()
+	m.RefreshInventoryIcons()
+	m.UpdateRoomDisplayAfterPickup()
+
+	log.Println("Finished PickupItems")
+}
+
+func (m *Manager) ImportRoomLayout(filename string) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+
+	capture := &RoomCapture{
+		FloorItems: make(map[string][]FloorItemInfo),
+		WallItems:  make(map[string][]WallItemInfo),
+		Timestamp:  time.Now(),
+	}
+
+	var currentItem string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "Name: ") {
+			currentItem = strings.TrimPrefix(line, "Name: ")
+			continue
+		}
+		if strings.HasPrefix(line, "Count: ") || strings.HasPrefix(line, "HC Value: ") {
+			continue
+		}
+		if strings.HasPrefix(line, "Item Details:") {
+			continue
+		}
+		if strings.Contains(line, "Location: ") {
+			parts := strings.Split(line, "Location: ")
+			if len(parts) == 2 {
+				wallInfo := WallItemInfo{
+					Name:          currentItem,
+					PlacementInfo: parts[1],
+				}
+				capture.WallItems[currentItem] = append(capture.WallItems[currentItem], wallInfo)
+			}
+		} else if strings.Contains(line, "(W:") {
+			parts := strings.Split(line, "(")
+			if len(parts) == 2 {
+				details := strings.Trim(parts[1], ")")
+				var x, y, w, h, dir int
+				fmt.Sscanf(details, "W:%d, H:%d, X:%d, Y:%d, Dir:%d", &w, &h, &x, &y, &dir)
+				floorInfo := FloorItemInfo{
+					Name:      currentItem,
+					Width:     w,
+					Height:    h,
+					X:         x,
+					Y:         y,
+					Direction: dir,
+				}
+				capture.FloorItems[currentItem] = append(capture.FloorItems[currentItem], floorInfo)
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	m.currentCapture = capture
+	return nil
+}
+func (m *Manager) canPlaceItemsInCurrentRoom() bool {
+	// Implement logic to check if the current room allows item placement
+	// This might involve checking room ownership or permissions
+	// For now, we'll return true as a placeholder
+	return true
+}
+
+func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
+	captureButton := widget.NewButton("Capture Current Room", func() {
+		m.CaptureCurrentRoom()
+		m.updateRoomDuplicatorContent()
+	})
+
+	validateButton := widget.NewButton("Validate Inventory", func() {
+		if m.currentCapture == nil {
+			dialog.ShowError(errors.New("no room captured"), m.window)
+			return
+		}
+		m.ValidateInventoryForCapture()
+		m.updateRoomDuplicatorContent()
+	})
+
+	duplicateButton := widget.NewButton("Duplicate Room", func() {
+		if m.currentCapture == nil {
+			dialog.ShowError(errors.New("no room captured"), m.window)
+			return
+		}
+		go func() {
+			err := m.DuplicateRoom(m.currentCapture)
+			if err != nil {
+				dialog.ShowError(err, m.window)
+			} else {
+				dialog.ShowInformation("Success", "Room duplication completed", m.window)
+			}
+		}()
+	})
+
+	importButton := widget.NewButton("Import Room Layout", func() {
+		dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
+			if err != nil {
+				dialog.ShowError(err, m.window)
+				return
+			}
+			if reader == nil {
+				return
+			}
+			defer reader.Close()
+
+			err = m.ImportRoomLayout(reader.URI().Path())
+			if err != nil {
+				dialog.ShowError(err, m.window)
+				return
+			}
+			dialog.ShowInformation("Success", "Room layout imported successfully", m.window)
+			m.updateRoomDuplicatorContent()
+		}, m.window)
+	})
+
+	exportButton := widget.NewButton("Export Current Capture", func() {
+		if m.currentCapture == nil {
+			dialog.ShowError(errors.New("no room captured"), m.window)
+			return
+		}
+		dialog.ShowFileSave(func(writer fyne.URIWriteCloser, err error) {
+			if err != nil {
+				dialog.ShowError(err, m.window)
+				return
+			}
+			if writer == nil {
+				return
+			}
+			defer writer.Close()
+
+			err = m.ExportRoomLayout(writer)
+			if err != nil {
+				dialog.ShowError(err, m.window)
+				return
+			}
+			dialog.ShowInformation("Success", "Room layout exported successfully", m.window)
+		}, m.window)
+	})
+
+	m.inventoryReportEntry = widget.NewMultiLineEntry()
+	m.inventoryReportEntry.SetText("Capture a room and validate inventory to see the report.")
+	m.inventoryReportEntry.Wrapping = fyne.TextWrapWord
+	m.inventoryReportEntry.SetMinRowsVisible(10)
+
+	inventoryReportContainer := m.createStyledMultiLineEntryContainer(m.inventoryReportEntry, "Inventory Validation")
+
+	content := container.NewVBox(
+		importButton,
+		exportButton,
+		captureButton,
+		validateButton,
+		duplicateButton,
+		inventoryReportContainer,
+	)
+
+	return m.createStyledContainerWithButtons(content, "Room Duplicator")
+}
+
+func (m *Manager) updateRoomDuplicatorContent() {
+	if m.inventoryReportEntry != nil {
+		m.inventoryReportEntry.SetText(m.ValidateInventoryForCapture())
+	}
+}
+
+func (m *Manager) ExportRoomLayout(writer io.Writer) error {
+	if m.currentCapture == nil {
+		return errors.New("no room captured")
+	}
+
+	for itemName, wallItems := range m.currentCapture.WallItems {
+		fmt.Fprintf(writer, "Name: %s\n", itemName)
+		fmt.Fprintf(writer, "Count: %d\n", len(wallItems))
+		fmt.Fprintf(writer, "HC Value: 0.00\n") // You might want to calculate the actual HC value
+		fmt.Fprintln(writer, "Item Details:")
+		for _, item := range wallItems {
+			fmt.Fprintf(writer, "(Location: %s\n", item.PlacementInfo)
+		}
+		fmt.Fprintln(writer)
+	}
+
+	for itemName, floorItems := range m.currentCapture.FloorItems {
+		fmt.Fprintf(writer, "Name: %s\n", itemName)
+		fmt.Fprintf(writer, "Count: %d\n", len(floorItems))
+		fmt.Fprintf(writer, "HC Value: 0.00\n") // You might want to calculate the actual HC value
+		fmt.Fprintln(writer, "Item Details:")
+		for _, item := range floorItems {
+			fmt.Fprintf(writer, "(W:%d, H:%d, X:%d, Y:%d, Dir:%d\n", item.Width, item.Height, item.X, item.Y, item.Direction)
+		}
+		fmt.Fprintln(writer)
+	}
+
+	return nil
+}
+
+func (m *Manager) ToggleRoomDuplicatorPopout() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.roomDuplicatorPopout == nil {
+		m.roomDuplicatorPopout = m.createRoomDuplicatorContent()
+	}
+
+	if m.roomDuplicatorPopout.Visible() {
+		m.roomDuplicatorPopout.Hide()
+	} else {
+		m.roomDuplicatorPopout.Show()
+		m.updateRoomDuplicatorContent()
+	}
+	m.window.Content().Refresh()
 }

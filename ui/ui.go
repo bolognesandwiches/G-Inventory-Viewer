@@ -213,26 +213,34 @@ func (m *Manager) setupInventoryTab() *fyne.Container {
 	m.summaryText.SetPlaceHolder("Click on 'Scan' to begin scanning your inventory!")
 	m.summaryText.SetMinRowsVisible(10)
 
-	openInventoryButton := widget.NewButton("Open Inventory", func() {
-		m.ToggleInventoryPopout() // Changed to toggle the popout instead
+	// Create smaller buttons
+	openInventoryButton := widget.NewButton("Inventory", func() {
+		m.ToggleInventoryPopout()
 	})
-
-	openTradeManagerButton := widget.NewButton("Open Trade Manager", func() {
+	openTradeManagerButton := widget.NewButton("Trade Manager", func() {
 		m.ToggleTradeManagerPopout()
 	})
-
-	openTradeLogButton := widget.NewButton("Open Trade Log", func() {
+	openTradeLogButton := widget.NewButton("Trade Log", func() {
 		m.ToggleTradeLogPopout()
 	})
 
-	summaryContainer := m.createStyledMultiLineEntryContainer(m.summaryText, "Inventory Summary")
-	idContainer := m.createStyledMultiLineEntryContainer(m.inventoryText, "Item Details")
+	// Set a smaller size for the buttons
+	buttonSize := fyne.NewSize(100, 30)
+	openInventoryButton.Resize(buttonSize)
+	openTradeManagerButton.Resize(buttonSize)
+	openTradeLogButton.Resize(buttonSize)
 
-	buttonsContainer := container.NewVBox(
+	// Create a horizontal container for the buttons
+	buttonsContainer := container.NewHBox(
+		layout.NewSpacer(),
 		openInventoryButton,
 		openTradeManagerButton,
 		openTradeLogButton,
+		layout.NewSpacer(),
 	)
+
+	summaryContainer := m.createStyledMultiLineEntryContainer(m.summaryText, "Inventory Summary")
+	idContainer := m.createStyledMultiLineEntryContainer(m.inventoryText, "Item Details")
 
 	mainContainer := container.NewVBox(
 		summaryContainer,
@@ -240,18 +248,8 @@ func (m *Manager) setupInventoryTab() *fyne.Container {
 		buttonsContainer,
 	)
 
-	// Create the trade log popout container and hide it initially
-	m.tradeLogPopout = m.createTradeLogContent()
-	m.tradeLogPopout.Hide()
-
-	return container.NewBorder(
-		mainContainer,
-		m.tradeLogPopout,
-		nil,
-		nil,
-	)
+	return mainContainer
 }
-
 func (m *Manager) ShowTradeLogWindow() {
 	if m.tradeLogPopout == nil {
 		m.tradeLogPopout = m.createTradeLogContent()
@@ -304,13 +302,31 @@ func (m *Manager) ToggleTradeManagerPopout() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	content := m.window.Content()
+	vSplit, ok := content.(*container.Split)
+	if !ok {
+		return
+	}
+	mainSplit, ok := vSplit.Leading.(*container.Split)
+	if !ok {
+		return
+	}
+	leftSplit, ok := mainSplit.Leading.(*container.Split)
+	if !ok {
+		return
+	}
+
 	if m.tradeManagerPopout.Visible() {
 		m.tradeManagerPopout.Hide()
+		leftSplit.Offset = 0                    // Collapse the trade manager
 		m.window.Resize(fyne.NewSize(800, 600)) // Resize to original state when hidden
 	} else {
 		m.tradeManagerPopout.Show()
-		m.window.Resize(fyne.NewSize(1000, 600)) // Resize to show the trade manager popout
+		leftSplit.Offset = 0.25                  // Show 25% of the trade manager
+		m.window.Resize(fyne.NewSize(1000, 600)) // Expand window to the left
 	}
+
+	leftSplit.Refresh()
 	m.window.Content().Refresh()
 }
 func (ui *UnifiedInventory) AddItem(item inventory.Item) {
@@ -982,7 +998,7 @@ func (m *Manager) createTradeLogContent() *fyne.Container {
 	m.tradeLogEntry = widget.NewMultiLineEntry()
 	m.tradeLogEntry.Wrapping = fyne.TextWrapWord
 	m.tradeLogEntry.SetPlaceHolder("Trade Log")
-	m.tradeLogEntry.SetMinRowsVisible(40)
+	m.tradeLogEntry.SetMinRowsVisible(20)
 
 	// Set the font to a monospaced font for consistent alignment
 	m.tradeLogEntry.TextStyle = fyne.TextStyle{Monospace: false}
@@ -1231,24 +1247,36 @@ func (m *Manager) Run() {
 	m.tradeManagerPopout = m.createTradeManagerContent()
 	m.tradeManagerPopout.Hide()
 
+	m.tradeLogPopout = m.createTradeLogContent()
+	m.tradeLogPopout.Hide()
+
 	m.roomDuplicatorPopout = m.createRoomDuplicatorContent()
 	m.roomDuplicatorPopout.Hide()
 
-	sidePopouts := container.NewVBox(
-		m.inventoryPopout,
-		m.tradeManagerPopout,
+	// Create a container for the bottom popouts
+	bottomPopouts := container.NewVBox(
+		m.tradeLogPopout,
 		m.roomDuplicatorPopout,
 	)
-	sideSplit := container.NewHSplit(mainContainer, sidePopouts)
-	sideSplit.Offset = 0.75
 
-	m.window.SetContent(sideSplit)
-	m.window.Resize(fyne.NewSize(1200, 800))
+	// Create a horizontal split for the trade manager and main content
+	leftSplit := container.NewHSplit(m.tradeManagerPopout, mainContainer)
+	leftSplit.Offset = 0 // This will make the trade manager start collapsed
+
+	// Create a horizontal split for the main content (including trade manager) and inventory
+	mainSplit := container.NewHSplit(leftSplit, m.inventoryPopout)
+	mainSplit.Offset = 1 // This will make the inventory start collapsed
+
+	// Create a vertical split for the main content and bottom popouts
+	fullContent := container.NewVSplit(mainSplit, bottomPopouts)
+	fullContent.Offset = 0.8
+
+	m.window.SetContent(fullContent)
+	m.window.Resize(fyne.NewSize(800, 600))
 	m.window.SetPadded(true)
 
 	m.window.ShowAndRun()
 }
-
 func (m *Manager) createTradeManagerContent() *fyne.Container {
 	// Initialize containers if they are nil
 	if m.tradeOfferContainer == nil {
@@ -1311,13 +1339,27 @@ func (m *Manager) ToggleInventoryPopout() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	content := m.window.Content()
+	vSplit, ok := content.(*container.Split)
+	if !ok {
+		return
+	}
+	mainSplit, ok := vSplit.Leading.(*container.Split)
+	if !ok {
+		return
+	}
+
 	if m.inventoryPopout.Visible() {
 		m.inventoryPopout.Hide()
+		mainSplit.Offset = 1                    // Collapse the inventory
 		m.window.Resize(fyne.NewSize(800, 600)) // Resize to original state when hidden
 	} else {
 		m.inventoryPopout.Show()
-		m.window.Resize(fyne.NewSize(1000, 600)) // Resize to show the inventory popout
+		mainSplit.Offset = 0.75                  // Show 25% of the inventory
+		m.window.Resize(fyne.NewSize(1000, 600)) // Expand window to the right
 	}
+
+	mainSplit.Refresh()
 	m.window.Content().Refresh()
 }
 
@@ -1524,7 +1566,6 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 	m.roomActionButton = widget.NewButton("Pick Up Items", func() {
 		if len(selectedItemIds) > 0 {
 			go func() {
-				log.Printf("Pickup button clicked for item IDs: %v\n", selectedItemIds)
 				m.PickupItems(selectedItemIds, func() {
 					m.UpdateRoomDisplayAfterPickup()
 				})
@@ -1553,29 +1594,6 @@ func (m *Manager) setupRoomSummaryTab() *fyne.Container {
 		roomIdContainer,
 		actionButtonContainer,
 	)
-}
-
-func (m *Manager) createInventoryWindow() fyne.Window {
-	inventoryWindow := m.app.NewWindow("Unified Inventory")
-	inventoryWindow.SetIcon(m.window.Icon())
-
-	if m.iconContainer == nil {
-		m.iconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
-	}
-
-	itemsScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.iconContainer))))
-	itemsScroll.SetMinSize(fyne.NewSize(36, 36*8)) // Set the minimum rows visible to 30
-
-	styledContainer := m.createStyledContainerWithButtons(itemsScroll, "Inventory Items")
-
-	inventoryWindow.SetContent(styledContainer)
-	inventoryWindow.Resize(fyne.NewSize(300, 400))
-
-	inventoryWindow.SetCloseIntercept(func() {
-		inventoryWindow.Hide()
-	})
-
-	return inventoryWindow
 }
 
 func (m *Manager) ShowInventoryWindow() {
@@ -2286,7 +2304,7 @@ func (m *Manager) DuplicateRoom(capture *RoomCapture) error {
 	if petalPatches, exists := capture.FloorItems["Petal Patch"]; exists {
 		for _, info := range petalPatches {
 			if !m.placeItem("Petal Patch", false, info) {
-				break
+				return fmt.Errorf("failed to place Petal Patch")
 			}
 			placedItems++
 			progress.SetValue(float64(placedItems) / float64(totalItems))
@@ -2298,7 +2316,7 @@ func (m *Manager) DuplicateRoom(capture *RoomCapture) error {
 	for itemName, itemInfos := range capture.FloorItems {
 		for _, info := range itemInfos {
 			if !m.placeItem(itemName, false, info) {
-				break
+				return fmt.Errorf("failed to place floor item: %s", itemName)
 			}
 			placedItems++
 			progress.SetValue(float64(placedItems) / float64(totalItems))
@@ -2309,16 +2327,17 @@ func (m *Manager) DuplicateRoom(capture *RoomCapture) error {
 	for itemName, itemInfos := range capture.WallItems {
 		for _, info := range itemInfos {
 			if !m.placeItem(itemName, true, info) {
-				break
+				return fmt.Errorf("failed to place wall item: %s", itemName)
 			}
 			placedItems++
 			progress.SetValue(float64(placedItems) / float64(totalItems))
 		}
 	}
 
-	if placedItems < totalItems {
-		return fmt.Errorf("ran out of items, placed %d out of %d", placedItems, totalItems)
-	}
+	m.RefreshInventorySummaryDisplay()
+	m.RefreshInventoryIcons()
+	m.RefreshTradingInventoryDisplay()
+	m.UpdateRoomDisplayAfterPickup()
 
 	return nil
 }
@@ -2347,7 +2366,6 @@ func (m *Manager) placeItem(itemName string, isWallItem bool, info interface{}) 
 	}
 
 	if itemToPlace == nil {
-		log.Printf("Item not found in inventory: %s", itemName)
 		return false
 	}
 
@@ -2361,74 +2379,73 @@ func (m *Manager) placeItem(itemName string, isWallItem bool, info interface{}) 
 		packetData = fmt.Sprintf("%d %d %d %d %d %d", itemToPlace.ItemId, floorInfo.X, floorInfo.Y, floorInfo.Width, floorInfo.Height, floorInfo.Direction)
 	}
 
-	// Send the packet using PLACESTUFF for both wall and floor items
 	m.ext.Send(out.PLACESTUFF, []byte(packetData))
 
-	log.Printf("Sent PLACESTUFF packet: %s", packetData)
+	// Instead of removing the item, decrease its quantity
+	unifiedItem := m.unifiedInventory.Items[itemId]
+	unifiedItem.Quantity--
+	if unifiedItem.Quantity <= 0 {
+		m.unifiedInventory.RemoveItem(itemId)
+	} else {
+		m.unifiedInventory.Items[itemId] = unifiedItem
+	}
 
-	// Remove the item from the unified inventory
-	m.unifiedInventory.RemoveItem(itemId)
-
-	// Increase delay to 600ms
 	time.Sleep(600 * time.Millisecond)
 
 	return true
 }
 
 func (m *Manager) PickupItems(itemIds []int, onComplete func()) {
-	log.Println("Starting PickupItems")
-	log.Printf("Items to pick up: %v", itemIds)
-
 	for _, id := range itemIds {
-		log.Printf("Attempting to pick up item %d", id)
-
 		var packetData string
-		var isFloorItem bool
+		var itemToAdd inventory.Item
 
-		if _, exists := m.roomManager.Objects[id]; exists {
+		if roomObj, exists := m.roomManager.Objects[id]; exists {
 			packetData = fmt.Sprintf("new stuff %d", id)
+			itemToAdd = inventory.Item{
+				ItemId: -abs(id), // Ensure floor item ID is negative
+				Type:   "S",
+				Class:  roomObj.Class,
+			}
 			delete(m.roomManager.Objects, id)
-			isFloorItem = true
-		} else if _, exists := m.roomManager.Items[id]; exists {
+		} else if roomItem, exists := m.roomManager.Items[id]; exists {
 			packetData = fmt.Sprintf("new item %d", id)
+			itemToAdd = inventory.Item{
+				ItemId: id, // Keep wall item ID as is (positive)
+				Type:   "I",
+				Class:  roomItem.Class,
+				Props:  roomItem.Type,
+			}
 			delete(m.roomManager.Items, id)
-			isFloorItem = false
 		} else {
-			log.Printf("Item ID %d not found in room objects or items", id)
 			continue
 		}
 
-		// Send the packet using ADDSTRIPITEM for both wall and floor items
 		m.ext.Send(out.ADDSTRIPITEM, []byte(packetData))
-		log.Printf("Sent ADDSTRIPITEM packet: %s", packetData)
-
-		// Create a placeholder inventory item
-		// You might need to adjust this based on your actual inventory item structure
-		newItem := inventory.Item{
-			ItemId: id,
-			Type:   inventory.ItemType(map[bool]string{true: "S", false: "I"}[isFloorItem]),
-		}
 
 		// Add the item to the unified inventory
-		m.unifiedInventory.AddItem(newItem)
+		m.unifiedInventory.AddItem(itemToAdd)
 
-		// Increase delay to 600ms to match placeItem
 		time.Sleep(600 * time.Millisecond)
 	}
 
-	log.Println("Pickup process completed")
 	if onComplete != nil {
-		log.Println("Calling onComplete callback")
 		onComplete()
 	}
 
 	m.RefreshInventorySummaryDisplay()
 	m.RefreshInventoryIcons()
+	m.RefreshTradingInventoryDisplay()
 	m.UpdateRoomDisplayAfterPickup()
-
-	log.Println("Finished PickupItems")
 }
 
+// Helper function to get absolute value
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
 func (m *Manager) ImportRoomLayout(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -2501,36 +2518,8 @@ func (m *Manager) canPlaceItemsInCurrentRoom() bool {
 }
 
 func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
-	captureButton := widget.NewButton("Capture Current Room", func() {
-		m.CaptureCurrentRoom()
-		m.updateRoomDuplicatorContent()
-	})
-
-	validateButton := widget.NewButton("Validate Inventory", func() {
-		if m.currentCapture == nil {
-			dialog.ShowError(errors.New("no room captured"), m.window)
-			return
-		}
-		m.ValidateInventoryForCapture()
-		m.updateRoomDuplicatorContent()
-	})
-
-	duplicateButton := widget.NewButton("Duplicate Room", func() {
-		if m.currentCapture == nil {
-			dialog.ShowError(errors.New("no room captured"), m.window)
-			return
-		}
-		go func() {
-			err := m.DuplicateRoom(m.currentCapture)
-			if err != nil {
-				dialog.ShowError(err, m.window)
-			} else {
-				dialog.ShowInformation("Success", "Room duplication completed", m.window)
-			}
-		}()
-	})
-
-	importButton := widget.NewButton("Import Room Layout", func() {
+	// Create smaller buttons
+	importButton := widget.NewButton("Import", func() {
 		dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
 			if err != nil {
 				dialog.ShowError(err, m.window)
@@ -2551,7 +2540,7 @@ func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
 		}, m.window)
 	})
 
-	exportButton := widget.NewButton("Export Current Capture", func() {
+	exportButton := widget.NewButton("Export", func() {
 		if m.currentCapture == nil {
 			dialog.ShowError(errors.New("no room captured"), m.window)
 			return
@@ -2575,6 +2564,54 @@ func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
 		}, m.window)
 	})
 
+	captureButton := widget.NewButton("Capture", func() {
+		m.CaptureCurrentRoom()
+		m.updateRoomDuplicatorContent()
+	})
+
+	validateButton := widget.NewButton("Validate", func() {
+		if m.currentCapture == nil {
+			dialog.ShowError(errors.New("no room captured"), m.window)
+			return
+		}
+		m.ValidateInventoryForCapture()
+		m.updateRoomDuplicatorContent()
+	})
+
+	duplicateButton := widget.NewButton("Duplicate", func() {
+		if m.currentCapture == nil {
+			dialog.ShowError(errors.New("no room captured"), m.window)
+			return
+		}
+		go func() {
+			err := m.DuplicateRoom(m.currentCapture)
+			if err != nil {
+				dialog.ShowError(err, m.window)
+			} else {
+				dialog.ShowInformation("Success", "Room duplication completed", m.window)
+			}
+		}()
+	})
+
+	// Set a smaller size for the buttons
+	buttonSize := fyne.NewSize(80, 30)
+	importButton.Resize(buttonSize)
+	exportButton.Resize(buttonSize)
+	captureButton.Resize(buttonSize)
+	validateButton.Resize(buttonSize)
+	duplicateButton.Resize(buttonSize)
+
+	// Create a horizontal container for the buttons
+	buttonsContainer := container.NewHBox(
+		layout.NewSpacer(),
+		importButton,
+		exportButton,
+		captureButton,
+		validateButton,
+		duplicateButton,
+		layout.NewSpacer(),
+	)
+
 	m.inventoryReportEntry = widget.NewMultiLineEntry()
 	m.inventoryReportEntry.SetText("Capture a room and validate inventory to see the report.")
 	m.inventoryReportEntry.Wrapping = fyne.TextWrapWord
@@ -2583,11 +2620,7 @@ func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
 	inventoryReportContainer := m.createStyledMultiLineEntryContainer(m.inventoryReportEntry, "Inventory Validation")
 
 	content := container.NewVBox(
-		importButton,
-		exportButton,
-		captureButton,
-		validateButton,
-		duplicateButton,
+		buttonsContainer,
 		inventoryReportContainer,
 	)
 
@@ -2640,8 +2673,10 @@ func (m *Manager) ToggleRoomDuplicatorPopout() {
 
 	if m.roomDuplicatorPopout.Visible() {
 		m.roomDuplicatorPopout.Hide()
+		m.window.Resize(fyne.NewSize(800, 600)) // Resize to original state when hidden
 	} else {
 		m.roomDuplicatorPopout.Show()
+		m.window.Resize(fyne.NewSize(800, 800)) // Resize to show the room duplicator popout
 		m.updateRoomDuplicatorContent()
 	}
 	m.window.Content().Refresh()

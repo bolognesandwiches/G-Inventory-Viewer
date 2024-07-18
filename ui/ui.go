@@ -7,7 +7,6 @@ import (
 	"image/color"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -75,6 +74,7 @@ type Manager struct {
 	itemsEntry                 *widget.Entry
 	roomMutex                  sync.RWMutex
 	roomItems                  map[int]room.Item
+	roomSummaryMu              sync.RWMutex
 	roomText                   *widget.Entry
 	roomSummaryText            *widget.Entry
 	roomIconContainer          *fyne.Container
@@ -429,6 +429,7 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 		theirTradeOffer:   make(map[string]int),
 		unifiedInventory:  NewUnifiedInventory(),
 		iconContainer:     container.NewGridWrap(fyne.NewSize(36, 36)), // Ensure this is initialized
+		roomSummaryMu:     sync.RWMutex{},                              // Initialize the mutex
 	}
 
 	// Register handlers for inventory changes
@@ -468,13 +469,19 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 	})
 
 	roomManager.ObjectsLoaded(func(args room.ObjectsArgs) {
-		log.Println("ObjectsLoaded event triggered")
-		go m.updateRoomDisplayFunc(roomManager.Objects, roomManager.Items)
+		go func() {
+			m.roomSummaryMu.Lock()
+			defer m.roomSummaryMu.Unlock()
+			m.updateRoomDisplayFunc(roomManager.Objects, roomManager.Items)
+		}()
 	})
 
 	roomManager.ItemsLoaded(func(args room.ItemsArgs) {
-		log.Println("ItemsLoaded event triggered")
-		go m.updateRoomDisplayFunc(roomManager.Objects, roomManager.Items)
+		go func() {
+			m.roomSummaryMu.Lock()
+			defer m.roomSummaryMu.Unlock()
+			m.updateRoomDisplayFunc(roomManager.Objects, roomManager.Items)
+		}()
 	})
 
 	return m
@@ -2209,10 +2216,8 @@ func (m *Manager) CaptureCurrentRoom() {
 		Timestamp:  time.Now(),
 	}
 
-	m.roomSummary.mu.RLock()
-	defer m.roomSummary.mu.RUnlock()
-
-	for _, obj := range m.roomSummary.Items {
+	// Capture floor items (Objects)
+	for _, obj := range m.roomManager.Objects {
 		enrichedObj := common.EnrichRoomObject(obj)
 		floorInfo := FloorItemInfo{
 			Name:      enrichedObj.Name,
@@ -2225,6 +2230,7 @@ func (m *Manager) CaptureCurrentRoom() {
 		capture.FloorItems[enrichedObj.Name] = append(capture.FloorItems[enrichedObj.Name], floorInfo)
 	}
 
+	// Capture wall items (Items)
 	for _, item := range m.roomManager.Items {
 		enrichedItem := common.EnrichRoomItem(item)
 		wallInfo := WallItemInfo{
@@ -2235,7 +2241,8 @@ func (m *Manager) CaptureCurrentRoom() {
 	}
 
 	m.currentCapture = capture
-	dialog.ShowInformation("Room Captured", "The current room layout has been captured.", m.window)
+
+	dialog.ShowInformation("Room Captured", fmt.Sprintf("The current room layout has been captured.\nFloor Items: %d, Wall Items: %d", len(capture.FloorItems), len(capture.WallItems)), m.window)
 }
 func (m *Manager) ValidateInventoryForCapture() string {
 	if m.currentCapture == nil {

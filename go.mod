@@ -1,16 +1,10 @@
 module github.com/bolognesandwiches/G-Inventory-Viewer
 
-go 1.22.5
+go 1.22
 
-require (
-	fyne.io/fyne/v2 v2.4.5
-	github.com/fogleman/gg v1.3.0
-)
+require fyne.io/fyne/v2 v2.4.5
 
-require (
-	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
-	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
-)
+require golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
 
 require (
 	fyne.io/systray v1.10.1-0.20231115130155-104f5ef7839e // indirect

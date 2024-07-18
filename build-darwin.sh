@@ -7,6 +7,7 @@ export CXX=o64-clang++
 export CGO_ENABLED=1
 export GOOS=darwin
 export GOARCH=amd64  # or arm64 for Apple Silicon
+export MACOSX_DEPLOYMENT_TARGET=10.14  # Update deployment target
 
 # Define variables
 NAME="G-itemViewer"

@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -924,25 +925,74 @@ func (m *Manager) updateTradeLogUI() {
 	defer m.tradeLogMutex.Unlock()
 
 	var logText strings.Builder
-	// Add header
-	logText.WriteString(fmt.Sprintf("ID\tDate\tTrader\tRecipient\tItem\tItem ID\tHC Value\n"))
 
-	for _, entry := range m.tradeLog {
-		for i := range entry.ItemsTraded {
-			logText.WriteString(fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%d\t%.2f\n",
-				entry.ID, entry.Date, entry.Trader, entry.Tradee,
-				entry.ItemsTraded[i], entry.ItemIDsTraded[i], entry.HCValuesTraded[i]))
+	// Helper function to truncate and pad strings
+	formatStr := func(str string, length int) string {
+		if len(str) > length {
+			return str[:length-3] + "..."
 		}
-		for i := range entry.ItemsReceived {
-			logText.WriteString(fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%d\t%.2f\n",
-				entry.ID, entry.Date, entry.Tradee, entry.Trader,
-				entry.ItemsReceived[i], entry.ItemIDsReceived[i], entry.HCValuesReceived[i]))
-		}
+		return str + strings.Repeat(" ", length-len(str))
 	}
+
+	// Add header
+	header := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s",
+		formatStr("ID", 5),
+		formatStr("Date", 20),
+		formatStr("Trader", 15),
+		formatStr("Recipient", 15),
+		formatStr("Item", 20),
+		formatStr("Item ID", 10),
+		formatStr("HC Value", 10))
+	logText.WriteString(header + "\n")
+	logText.WriteString(strings.Repeat("-", 100) + "\n")
+
+	// Sort trades in descending order
+	sortedTrades := make([]TradeLogEntry, len(m.tradeLog))
+	copy(sortedTrades, m.tradeLog)
+	sort.Slice(sortedTrades, func(i, j int) bool {
+		return sortedTrades[i].ID > sortedTrades[j].ID
+	})
+
+	for _, entry := range sortedTrades {
+		// Write traded items
+		for i := range entry.ItemsTraded {
+			line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%d\t%.2f",
+				formatStr(fmt.Sprintf("%d", entry.ID), 5),
+				formatStr(entry.Date, 20),
+				formatStr(entry.Trader, 15),
+				formatStr(entry.Tradee, 15),
+				formatStr(entry.ItemsTraded[i], 20),
+				abs(entry.ItemIDsTraded[i]),
+				entry.HCValuesTraded[i])
+			logText.WriteString(line + "\n")
+		}
+		// Write received items
+		for i := range entry.ItemsReceived {
+			line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%d\t%.2f",
+				formatStr(fmt.Sprintf("%d", entry.ID), 5),
+				formatStr(entry.Date, 20),
+				formatStr(entry.Tradee, 15),
+				formatStr(entry.Trader, 15),
+				formatStr(entry.ItemsReceived[i], 20),
+				abs(entry.ItemIDsReceived[i]),
+				entry.HCValuesReceived[i])
+			logText.WriteString(line + "\n")
+		}
+		// Add a spacer between trades
+		logText.WriteString(strings.Repeat("-", 120) + "\n")
+	}
+
 	m.tradeLogEntry.SetText(logText.String())
-	m.tradeLogEntry.Refresh() // Ensure the entry widget is refreshed
+	m.tradeLogEntry.Refresh()
 }
 
+// Helper function to truncate long strings
+func truncateString(s string, maxLength int) string {
+	if len(s) <= maxLength {
+		return s
+	}
+	return s[:maxLength-3] + "..."
+}
 func (m *Manager) exportTradeLogToCSV() {
 	var csvContent strings.Builder
 	csvContent.WriteString("ID,Date,Trader,Recipient,Item,Item ID,HC Value\n")

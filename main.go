@@ -50,8 +50,6 @@ func startInventoryCount() {
 	refreshed = false
 	isCountingHand = true
 
-	uiManager.SetScanButtonActive(true)
-
 	inventoryMgr.Update()
 }
 
@@ -85,6 +83,10 @@ func tickCounter() {
 	} else {
 		ext.Send(out.GETSTRIP, []byte("next"))
 	}
+}
+
+func init() {
+	runtime.LockOSThread()
 }
 
 func main() {

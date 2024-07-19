@@ -4,7 +4,11 @@ go 1.22
 
 require fyne.io/fyne/v2 v2.4.5
 
-require golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
+require (
+	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/lxn/win v0.0.0-20210218163916-a377121e959e // indirect
+	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
+)
 
 require (
 	fyne.io/systray v1.10.1-0.20231115130155-104f5ef7839e // indirect

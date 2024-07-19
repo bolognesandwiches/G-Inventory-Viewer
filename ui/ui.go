@@ -115,7 +115,7 @@ type Manager struct {
 	tradeManagerPopout         *fyne.Container
 	tradeLogPopout             *fyne.Container
 	roomSummary                *RoomSummary
-	roomDuplicatorPopout       *fyne.Container
+	roomToolsPopout            *fyne.Container
 	currentCapture             *RoomCapture
 	inventoryReportEntry       *widget.Entry
 }
@@ -223,12 +223,16 @@ func (m *Manager) setupInventoryTab() *fyne.Container {
 	openTradeLogButton := widget.NewButton("Trade Log", func() {
 		m.ToggleTradeLogPopout()
 	})
+	openRoomToolsButton := widget.NewButton("Room Tools", func() {
+		m.ToggleRoomToolsPopout()
+	})
 
 	// Set a smaller size for the buttons
 	buttonSize := fyne.NewSize(100, 30)
 	openInventoryButton.Resize(buttonSize)
 	openTradeManagerButton.Resize(buttonSize)
 	openTradeLogButton.Resize(buttonSize)
+	openRoomToolsButton.Resize(buttonSize)
 
 	// Create a horizontal container for the buttons
 	buttonsContainer := container.NewHBox(
@@ -236,6 +240,7 @@ func (m *Manager) setupInventoryTab() *fyne.Container {
 		openInventoryButton,
 		openTradeManagerButton,
 		openTradeLogButton,
+		openRoomToolsButton,
 		layout.NewSpacer(),
 	)
 
@@ -302,31 +307,23 @@ func (m *Manager) ToggleTradeManagerPopout() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	content := m.window.Content()
-	vSplit, ok := content.(*container.Split)
-	if !ok {
-		return
-	}
-	mainSplit, ok := vSplit.Leading.(*container.Split)
-	if !ok {
-		return
-	}
-	leftSplit, ok := mainSplit.Leading.(*container.Split)
-	if !ok {
-		return
-	}
-
 	if m.tradeManagerPopout.Visible() {
 		m.tradeManagerPopout.Hide()
-		leftSplit.Offset = 0                    // Collapse the trade manager
-		m.window.Resize(fyne.NewSize(800, 600)) // Resize to original state when hidden
 	} else {
 		m.tradeManagerPopout.Show()
-		leftSplit.Offset = 0.25                  // Show 25% of the trade manager
-		m.window.Resize(fyne.NewSize(1000, 600)) // Expand window to the left
 	}
+	m.window.Content().Refresh()
+}
 
-	leftSplit.Refresh()
+func (m *Manager) ToggleInventoryPopout() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.inventoryPopout.Visible() {
+		m.inventoryPopout.Hide()
+	} else {
+		m.inventoryPopout.Show()
+	}
 	m.window.Content().Refresh()
 }
 func (ui *UnifiedInventory) AddItem(item inventory.Item) {
@@ -535,22 +532,6 @@ func (m *Manager) HandleItemAddition(item inventory.Item) {
 	m.RefreshInventoryIcons()
 }
 
-func (m *Manager) handleInventoryUpdate(newInventory map[int]inventory.Item) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Check for new items (pickups)
-	for id, item := range newInventory {
-		if _, exists := m.unifiedInventory.Items[id]; !exists {
-			m.unifiedInventory.AddItem(item)
-			m.RefreshInventorySummaryDisplay()
-			m.RefreshInventoryIcons()
-		}
-	}
-
-	// We don't need to check for removed items here,
-	// as that's handled by the ItemRemoved event
-}
 func (m *Manager) HandleItemRemoval(item inventory.Item) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1005,7 +986,7 @@ func (m *Manager) createTradeLogContent() *fyne.Container {
 	m.tradeLogEntry = widget.NewMultiLineEntry()
 	m.tradeLogEntry.Wrapping = fyne.TextWrapWord
 	m.tradeLogEntry.SetPlaceHolder("Trade Log")
-	m.tradeLogEntry.SetMinRowsVisible(20)
+	m.tradeLogEntry.SetMinRowsVisible(10)
 
 	// Set the font to a monospaced font for consistent alignment
 	m.tradeLogEntry.TextStyle = fyne.TextStyle{Monospace: false}
@@ -1211,26 +1192,19 @@ func (m *Manager) Run() {
 	)
 
 	inventoryTab := m.setupInventoryTab()
-	roomSummaryTab := m.setupRoomSummaryTab()
 
-	tabs := NewCustomTabContainer(m, "Inventory", "Room")
+	tabs := NewCustomTabContainer(m, "Inventory")
 	m.scanButton = tabs.scanButton
 	tabs.Refresh()
 
 	content := container.NewMax()
 
 	updateContent := func() {
-		switch tabs.selected {
-		case 0:
-			content.Objects = []fyne.CanvasObject{inventoryTab}
-			tabs.scanButton.OnTapped = func() {
-				if m.scanCallback != nil {
-					m.scanCallback()
-				}
+		content.Objects = []fyne.CanvasObject{inventoryTab}
+		tabs.scanButton.OnTapped = func() {
+			if m.scanCallback != nil {
+				m.scanCallback()
 			}
-		case 1:
-			content.Objects = []fyne.CanvasObject{roomSummaryTab}
-			tabs.scanButton.OnTapped = func() {}
 		}
 		content.Refresh()
 	}
@@ -1257,35 +1231,25 @@ func (m *Manager) Run() {
 	m.tradeLogPopout = m.createTradeLogContent()
 	m.tradeLogPopout.Hide()
 
-	m.roomDuplicatorPopout = m.createRoomDuplicatorContent()
-	m.roomDuplicatorPopout.Hide()
+	m.roomToolsPopout = m.createRoomToolsContent()
+	m.roomToolsPopout.Hide()
 
-	// Create a container for the bottom popouts
-	bottomPopouts := container.NewVBox(
-		m.tradeLogPopout,
-		m.roomDuplicatorPopout,
+	// Create the main layout
+	mainLayout := container.NewBorder(
+		nil,
+		container.NewVBox(m.tradeLogPopout, m.roomToolsPopout),
+		m.tradeManagerPopout,
+		m.inventoryPopout,
+		mainContainer,
 	)
 
-	// Create a horizontal split for the trade manager and main content
-	leftSplit := container.NewHSplit(m.tradeManagerPopout, mainContainer)
-	leftSplit.Offset = 0 // This will make the trade manager start collapsed
-
-	// Create a horizontal split for the main content (including trade manager) and inventory
-	mainSplit := container.NewHSplit(leftSplit, m.inventoryPopout)
-	mainSplit.Offset = 1 // This will make the inventory start collapsed
-
-	// Create a vertical split for the main content and bottom popouts
-	fullContent := container.NewVSplit(mainSplit, bottomPopouts)
-	fullContent.Offset = 0.8
-
-	m.window.SetContent(fullContent)
-	m.window.Resize(fyne.NewSize(800, 600))
+	m.window.SetContent(mainLayout)
+	m.window.Resize(fyne.NewSize(300, 600))
 	m.window.SetPadded(true)
 
 	m.window.ShowAndRun()
 }
 func (m *Manager) createTradeManagerContent() *fyne.Container {
-	// Initialize containers if they are nil
 	if m.tradeOfferContainer == nil {
 		m.tradeOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
 	}
@@ -1293,20 +1257,28 @@ func (m *Manager) createTradeManagerContent() *fyne.Container {
 		m.otherOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
 	}
 
-	// Create the trade summary entry
 	m.tradeNewEntry = widget.NewMultiLineEntry()
 	m.tradeNewEntry.Wrapping = fyne.TextWrapWord
 	m.tradeNewEntry.SetPlaceHolder("Awaiting trade...")
 	m.tradeNewEntry.SetMinRowsVisible(8)
 
-	// Create a container for the trade summary
 	tradeSummaryContainer := m.createStyledMultiLineEntryContainer(m.tradeNewEntry, "Trade Summary")
 
-	// Create styled scroll containers for trade offers
+	// Wrap the scroll containers in a container with a fixed size
 	tradeOfferScroll := m.createStyledScrollContainer(m.tradeOfferContainer, "Your Offer")
-	otherOfferScroll := m.createStyledScrollContainer(m.otherOfferContainer, "Their Offer")
+	tradeOfferFixedSize := container.NewVBox(
+		tradeOfferScroll,
+		layout.NewSpacer(),
+	)
+	tradeOfferFixedSize.Resize(fyne.NewSize(200, 100)) // Set the fixed size for 'Your Offer'
 
-	// Initialize buttons
+	otherOfferScroll := m.createStyledScrollContainer(m.otherOfferContainer, "Their Offer")
+	otherOfferFixedSize := container.NewVBox(
+		otherOfferScroll,
+		layout.NewSpacer(),
+	)
+	otherOfferFixedSize.Resize(fyne.NewSize(200, 100)) // Set the fixed size for 'Their Offer'
+
 	m.tradeAcceptButton = widget.NewButton("Accept Trade", func() {
 		m.showTradeConfirmationDialog()
 	})
@@ -1322,52 +1294,25 @@ func (m *Manager) createTradeManagerContent() *fyne.Container {
 		layout.NewSpacer(),
 	)
 
-	// Create the main content container for the trade manager
 	content := container.NewVBox(
 		tradeSummaryContainer,
-		tradeOfferScroll,
-		otherOfferScroll,
+		tradeOfferFixedSize,
+		otherOfferFixedSize,
 		actionButtonContainer,
 	)
 
-	// Style the container
 	styledContainer := m.createStyledContainerWithButtons(content, "Trade Manager")
 
-	// Create the popout container
 	popout := container.NewVBox(
 		styledContainer,
+		layout.NewSpacer(), // Ensures the minimum height
 	)
 
-	popout.Hide() // Ensure it's hidden initially
-	return popout
-}
+	// Ensure the popout respects the minimum size
+	popoutMinSize := fyne.NewSize(200, 375)
+	popout.Resize(popoutMinSize) // Ensure the popout respects the minimum size
 
-func (m *Manager) ToggleInventoryPopout() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	content := m.window.Content()
-	vSplit, ok := content.(*container.Split)
-	if !ok {
-		return
-	}
-	mainSplit, ok := vSplit.Leading.(*container.Split)
-	if !ok {
-		return
-	}
-
-	if m.inventoryPopout.Visible() {
-		m.inventoryPopout.Hide()
-		mainSplit.Offset = 1                    // Collapse the inventory
-		m.window.Resize(fyne.NewSize(800, 600)) // Resize to original state when hidden
-	} else {
-		m.inventoryPopout.Show()
-		mainSplit.Offset = 0.75                  // Show 25% of the inventory
-		m.window.Resize(fyne.NewSize(1000, 600)) // Expand window to the right
-	}
-
-	mainSplit.Refresh()
-	m.window.Content().Refresh()
+	return container.NewMax(popout)
 }
 
 func (m *Manager) createInventoryContent() *fyne.Container {
@@ -1376,7 +1321,7 @@ func (m *Manager) createInventoryContent() *fyne.Container {
 	}
 
 	itemsScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.iconContainer))))
-	itemsScroll.SetMinSize(fyne.NewSize(36, 36*8)) // Set the minimum rows visible to 30
+	itemsScroll.SetMinSize(fyne.NewSize(200, 375))
 
 	styledContainer := m.createStyledContainerWithButtons(itemsScroll, "Inventory Items")
 
@@ -1384,7 +1329,6 @@ func (m *Manager) createInventoryContent() *fyne.Container {
 		styledContainer,
 	)
 
-	popout.Hide() // Ensure it's hidden initially
 	return popout
 }
 
@@ -1434,175 +1378,6 @@ func (m *Manager) UpdateDiscordButtonState(active bool) {
 	}
 }
 
-func (m *Manager) setupRoomSummaryTab() *fyne.Container {
-	m.roomText = widget.NewMultiLineEntry()
-	m.roomText.Wrapping = fyne.TextWrapWord
-	m.roomText.SetPlaceHolder("Room Item IDs")
-	m.roomText.SetMinRowsVisible(10)
-
-	m.roomSummaryText = widget.NewMultiLineEntry()
-	m.roomSummaryText.Wrapping = fyne.TextWrapWord
-	m.roomSummaryText.SetPlaceHolder("Room Summary")
-	m.roomSummaryText.SetMinRowsVisible(10)
-
-	m.roomIconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
-	roomItemsScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.roomIconContainer))))
-	roomItemsScroll.SetMinSize(fyne.NewSize(0, 125))
-
-	var selectedItemIds []int
-
-	updateRoomDisplay := func(objects map[int]room.Object, items map[int]room.Item) {
-		m.roomSummary.mu.Lock()
-		defer m.roomSummary.mu.Unlock()
-
-		m.roomIconContainer.Objects = nil
-		enrichedObjects := make(map[string][]common.EnrichedRoomObject)
-		enrichedItems := make(map[string][]common.EnrichedRoomItem)
-
-		for _, obj := range objects {
-			enrichedObj := common.EnrichRoomObject(obj)
-			enrichedObjects[enrichedObj.Class] = append(enrichedObjects[enrichedObj.Class], enrichedObj)
-		}
-
-		for _, item := range items {
-			enrichedItem := common.EnrichRoomItem(item)
-			enrichedItems[enrichedItem.Class] = append(enrichedItems[enrichedItem.Class], enrichedItem)
-		}
-
-		for _, objects := range enrichedObjects {
-			btn := widget.NewButton("", func() {
-				var details strings.Builder
-				selectedItemIds = make([]int, 0, len(objects))
-
-				details.WriteString(fmt.Sprintf("Name: %s\n", objects[0].Name))
-				details.WriteString(fmt.Sprintf("Count: %d\n", len(objects)))
-				totalHCValue := objects[0].HCValue * float64(len(objects))
-				details.WriteString(fmt.Sprintf("HC Value: %.2f\n", totalHCValue))
-				details.WriteString("Item Details:\n")
-				for _, obj := range objects {
-					details.WriteString(fmt.Sprintf("%d (W:%d, H:%d, X:%d, Y:%d, Dir:%d)\n",
-						obj.Id, obj.Width, obj.Height, obj.X, obj.Y, obj.Direction))
-					selectedItemIds = append(selectedItemIds, obj.Id)
-				}
-				m.roomText.SetText(details.String())
-				m.roomActionButton.Enable()
-			})
-
-			btn.SetIcon(theme.AccountIcon())
-			btn.Resize(fyne.NewSize(44, 44))
-
-			go func(iconURL string) {
-				resp, err := http.Get(iconURL)
-				if err != nil {
-					return
-				}
-				defer resp.Body.Close()
-
-				iconData, err := ioutil.ReadAll(resp.Body)
-				if err != nil {
-					return
-				}
-
-				iconResource := fyne.NewStaticResource("icon", iconData)
-				btn.SetIcon(iconResource)
-				btn.Refresh()
-			}(objects[0].IconURL)
-
-			m.roomIconContainer.Add(btn)
-		}
-
-		for _, items := range enrichedItems {
-			btn := widget.NewButton("", func() {
-				var details strings.Builder
-				selectedItemIds = make([]int, 0, len(items))
-
-				details.WriteString(fmt.Sprintf("Name: %s\n", items[0].Name))
-				details.WriteString(fmt.Sprintf("Count: %d\n", len(items)))
-				totalHCValue := items[0].HCValue * float64(len(items))
-				details.WriteString(fmt.Sprintf("HC Value: %.2f\n", totalHCValue))
-				details.WriteString("Item Details:\n")
-				for _, item := range items {
-					details.WriteString(fmt.Sprintf("%d (Location: %s)\n", item.Id, item.Location))
-					selectedItemIds = append(selectedItemIds, item.Id)
-				}
-				m.roomText.SetText(details.String())
-				m.roomActionButton.Enable()
-			})
-
-			btn.SetIcon(theme.AccountIcon())
-			btn.Resize(fyne.NewSize(44, 44))
-
-			go func(iconURL string) {
-				resp, err := http.Get(iconURL)
-				if err != nil {
-					return
-				}
-				defer resp.Body.Close()
-
-				iconData, err := ioutil.ReadAll(resp.Body)
-				if err != nil {
-					return
-				}
-
-				iconResource := fyne.NewStaticResource("icon", iconData)
-				btn.SetIcon(iconResource)
-				btn.Refresh()
-			}(items[0].IconURL)
-
-			m.roomIconContainer.Add(btn)
-		}
-
-		m.roomIconContainer.Refresh()
-
-		m.roomSummaryText.SetText(common.GetRoomSummary(objects, items))
-
-		var itemIDs strings.Builder
-		for id := range objects {
-			itemIDs.WriteString(fmt.Sprintf("%d\n", id))
-		}
-		for id := range items {
-			itemIDs.WriteString(fmt.Sprintf("%d\n", id))
-		}
-		m.roomText.SetText(itemIDs.String())
-	}
-
-	roomSummaryContainer := m.createStyledMultiLineEntryContainer(m.roomSummaryText, "Room Summary")
-	roomItemsContainer := m.createStyledContainerWithButtons(roomItemsScroll, "Room Items")
-	roomIdContainer := m.createStyledMultiLineEntryContainer(m.roomText, "Room Item IDs")
-
-	m.roomActionButton = widget.NewButton("Pick Up Items", func() {
-		if len(selectedItemIds) > 0 {
-			go func() {
-				m.PickupItems(selectedItemIds, func() {
-					m.UpdateRoomDisplayAfterPickup()
-				})
-			}()
-		}
-	})
-
-	m.roomActionButton.Disable()
-
-	roomDuplicatorButton := widget.NewButton("Room Duplicator", func() {
-		m.ToggleRoomDuplicatorPopout()
-	})
-
-	actionButtonContainer := container.NewHBox(
-		layout.NewSpacer(),
-		m.roomActionButton,
-		roomDuplicatorButton,
-		layout.NewSpacer(),
-	)
-
-	m.updateRoomDisplayFunc = updateRoomDisplay
-
-	return container.NewVBox(
-		roomSummaryContainer,
-		roomItemsContainer,
-		roomIdContainer,
-		actionButtonContainer,
-	)
-}
-
 func (m *Manager) ShowInventoryWindow() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1611,66 +1386,6 @@ func (m *Manager) ShowInventoryWindow() {
 	}
 	m.inventoryPopout.Show()
 	m.window.Content().Refresh()
-}
-
-func (m *Manager) addObjectIcon(obj room.Object) {
-	btn := widget.NewButton("", func() {
-		m.roomText.SetText(common.GetRoomObjectDetails(obj))
-	})
-
-	btn.SetIcon(theme.AccountIcon())
-	btn.Resize(fyne.NewSize(44, 44))
-
-	go func() {
-		enrichedObj := common.EnrichRoomObject(obj)
-		iconURL := enrichedObj.IconURL
-		resp, err := http.Get(iconURL)
-		if err != nil {
-			return
-		}
-		defer resp.Body.Close()
-
-		iconData, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return
-		}
-
-		iconResource := fyne.NewStaticResource("icon", iconData)
-		btn.SetIcon(iconResource)
-		btn.Refresh()
-	}()
-
-	m.roomIconContainer.Add(btn)
-}
-
-func (m *Manager) addItemIcon(item room.Item) {
-	btn := widget.NewButton("", func() {
-		m.roomText.SetText(common.GetRoomItemDetails(item))
-	})
-
-	btn.SetIcon(theme.AccountIcon())
-	btn.Resize(fyne.NewSize(44, 44))
-
-	go func() {
-		enrichedItem := common.EnrichRoomItem(item)
-		iconURL := enrichedItem.IconURL
-		resp, err := http.Get(iconURL)
-		if err != nil {
-			return
-		}
-		defer resp.Body.Close()
-
-		iconData, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return
-		}
-
-		iconResource := fyne.NewStaticResource("icon", iconData)
-		btn.SetIcon(iconResource)
-		btn.Refresh()
-	}()
-
-	m.roomIconContainer.Add(btn)
 }
 
 func (m *Manager) loadImage(filename string) (fyne.Resource, error) {
@@ -1986,22 +1701,6 @@ func loadScanIconInactive() fyne.Resource {
 	res, err := (&Manager{}).loadImage("scan_icon_inactive.png")
 	if err != nil {
 		return theme.SearchIcon()
-	}
-	return res
-}
-
-func loadDiscordIcon() fyne.Resource {
-	res, err := (&Manager{}).loadImage("discord.png")
-	if err != nil {
-		return theme.InfoIcon() // Fallback icon
-	}
-	return res
-}
-
-func loadRoomActionIcon() fyne.Resource {
-	res, err := (&Manager{}).loadImage("room_action_icon.png")
-	if err != nil {
-		return theme.InfoIcon() // Fallback icon
 	}
 	return res
 }
@@ -2524,8 +2223,164 @@ func (m *Manager) canPlaceItemsInCurrentRoom() bool {
 	return true
 }
 
-func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
-	// Create smaller buttons
+func (m *Manager) createRoomToolsContent() *fyne.Container {
+	// Room Summary content
+	m.roomText = widget.NewMultiLineEntry()
+	m.roomText.Wrapping = fyne.TextWrapWord
+	m.roomText.SetPlaceHolder("Room Item IDs")
+	m.roomText.SetMinRowsVisible(5)
+
+	m.roomSummaryText = widget.NewMultiLineEntry()
+	m.roomSummaryText.Wrapping = fyne.TextWrapWord
+	m.roomSummaryText.SetPlaceHolder("Room Summary")
+	m.roomSummaryText.SetMinRowsVisible(5)
+
+	m.roomIconContainer = container.NewGridWrap(fyne.NewSize(36, 36))
+	roomItemsScroll := container.NewScroll(container.NewPadded(container.NewPadded(container.NewPadded(m.roomIconContainer))))
+	roomItemsScroll.SetMinSize(fyne.NewSize(0, 125))
+
+	var selectedItemIds []int
+
+	updateRoomDisplay := func(objects map[int]room.Object, items map[int]room.Item) {
+		m.roomSummary.mu.Lock()
+		defer m.roomSummary.mu.Unlock()
+
+		m.roomIconContainer.Objects = nil
+		enrichedObjects := make(map[string][]common.EnrichedRoomObject)
+		enrichedItems := make(map[string][]common.EnrichedRoomItem)
+
+		for _, obj := range objects {
+			enrichedObj := common.EnrichRoomObject(obj)
+			enrichedObjects[enrichedObj.Class] = append(enrichedObjects[enrichedObj.Class], enrichedObj)
+		}
+
+		for _, item := range items {
+			enrichedItem := common.EnrichRoomItem(item)
+			enrichedItems[enrichedItem.Class] = append(enrichedItems[enrichedItem.Class], enrichedItem)
+		}
+
+		for _, objects := range enrichedObjects {
+			btn := widget.NewButton("", func() {
+				var details strings.Builder
+				selectedItemIds = make([]int, 0, len(objects))
+
+				details.WriteString(fmt.Sprintf("Name: %s\n", objects[0].Name))
+				details.WriteString(fmt.Sprintf("Count: %d\n", len(objects)))
+				totalHCValue := objects[0].HCValue * float64(len(objects))
+				details.WriteString(fmt.Sprintf("HC Value: %.2f\n", totalHCValue))
+				details.WriteString("Item Details:\n")
+				for _, obj := range objects {
+					details.WriteString(fmt.Sprintf("%d (W:%d, H:%d, X:%d, Y:%d, Dir:%d)\n",
+						obj.Id, obj.Width, obj.Height, obj.X, obj.Y, obj.Direction))
+					selectedItemIds = append(selectedItemIds, obj.Id)
+				}
+				m.roomText.SetText(details.String())
+				m.roomActionButton.Enable()
+			})
+
+			btn.SetIcon(theme.AccountIcon())
+			btn.Resize(fyne.NewSize(44, 44))
+
+			go func(iconURL string) {
+				resp, err := http.Get(iconURL)
+				if err != nil {
+					return
+				}
+				defer resp.Body.Close()
+
+				iconData, err := ioutil.ReadAll(resp.Body)
+				if err != nil {
+					return
+				}
+
+				iconResource := fyne.NewStaticResource("icon", iconData)
+				btn.SetIcon(iconResource)
+				btn.Refresh()
+			}(objects[0].IconURL)
+
+			m.roomIconContainer.Add(btn)
+		}
+
+		for _, items := range enrichedItems {
+			btn := widget.NewButton("", func() {
+				var details strings.Builder
+				selectedItemIds = make([]int, 0, len(items))
+
+				details.WriteString(fmt.Sprintf("Name: %s\n", items[0].Name))
+				details.WriteString(fmt.Sprintf("Count: %d\n", len(items)))
+				totalHCValue := items[0].HCValue * float64(len(items))
+				details.WriteString(fmt.Sprintf("HC Value: %.2f\n", totalHCValue))
+				details.WriteString("Item Details:\n")
+				for _, item := range items {
+					details.WriteString(fmt.Sprintf("%d (Location: %s)\n", item.Id, item.Location))
+					selectedItemIds = append(selectedItemIds, item.Id)
+				}
+				m.roomText.SetText(details.String())
+				m.roomActionButton.Enable()
+			})
+
+			btn.SetIcon(theme.AccountIcon())
+			btn.Resize(fyne.NewSize(44, 44))
+
+			go func(iconURL string) {
+				resp, err := http.Get(iconURL)
+				if err != nil {
+					return
+				}
+				defer resp.Body.Close()
+
+				iconData, err := ioutil.ReadAll(resp.Body)
+				if err != nil {
+					return
+				}
+
+				iconResource := fyne.NewStaticResource("icon", iconData)
+				btn.SetIcon(iconResource)
+				btn.Refresh()
+			}(items[0].IconURL)
+
+			m.roomIconContainer.Add(btn)
+		}
+
+		m.roomIconContainer.Refresh()
+
+		m.roomSummaryText.SetText(common.GetRoomSummary(objects, items))
+
+		var itemIDs strings.Builder
+		for id := range objects {
+			itemIDs.WriteString(fmt.Sprintf("%d\n", id))
+		}
+		for id := range items {
+			itemIDs.WriteString(fmt.Sprintf("%d\n", id))
+		}
+		m.roomText.SetText(itemIDs.String())
+	}
+
+	m.updateRoomDisplayFunc = updateRoomDisplay
+
+	roomSummaryContainer := m.createStyledMultiLineEntryContainer(m.roomSummaryText, "Room Summary")
+	roomItemsContainer := m.createStyledContainerWithButtons(roomItemsScroll, "Room Items")
+	roomIdContainer := m.createStyledMultiLineEntryContainer(m.roomText, "Room Item IDs")
+
+	// Create a horizontal container for Room Items and Room Item IDs
+	roomItemsAndIdsContainer := NewCustomSplit(Horizontal,
+		roomItemsContainer,
+		roomIdContainer,
+	)
+	roomItemsAndIdsContainer.SetOffset(0.6) // Adjust this value to change the relative sizes
+
+	m.roomActionButton = widget.NewButton("Pick Up Items", func() {
+		if len(selectedItemIds) > 0 {
+			go func() {
+				m.PickupItems(selectedItemIds, func() {
+					m.UpdateRoomDisplayAfterPickup()
+				})
+			}()
+		}
+	})
+	m.roomActionButton.Disable()
+
+	// Room Duplicator content
 	importButton := widget.NewButton("Import", func() {
 		dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
 			if err != nil {
@@ -2543,7 +2398,7 @@ func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
 				return
 			}
 			dialog.ShowInformation("Success", "Room layout imported successfully", m.window)
-			m.updateRoomDuplicatorContent()
+			m.updateRoomToolsContent()
 		}, m.window)
 	})
 
@@ -2573,7 +2428,7 @@ func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
 
 	captureButton := widget.NewButton("Capture", func() {
 		m.CaptureCurrentRoom()
-		m.updateRoomDuplicatorContent()
+		m.updateRoomToolsContent()
 	})
 
 	validateButton := widget.NewButton("Validate", func() {
@@ -2582,7 +2437,7 @@ func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
 			return
 		}
 		m.ValidateInventoryForCapture()
-		m.updateRoomDuplicatorContent()
+		m.updateRoomToolsContent()
 	})
 
 	duplicateButton := widget.NewButton("Duplicate", func() {
@@ -2600,15 +2455,14 @@ func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
 		}()
 	})
 
-	// Set a smaller size for the buttons
 	buttonSize := fyne.NewSize(80, 30)
 	importButton.Resize(buttonSize)
 	exportButton.Resize(buttonSize)
 	captureButton.Resize(buttonSize)
 	validateButton.Resize(buttonSize)
 	duplicateButton.Resize(buttonSize)
+	m.roomActionButton.Resize(buttonSize)
 
-	// Create a horizontal container for the buttons
 	buttonsContainer := container.NewHBox(
 		layout.NewSpacer(),
 		importButton,
@@ -2616,25 +2470,35 @@ func (m *Manager) createRoomDuplicatorContent() *fyne.Container {
 		captureButton,
 		validateButton,
 		duplicateButton,
+		m.roomActionButton,
 		layout.NewSpacer(),
 	)
 
 	m.inventoryReportEntry = widget.NewMultiLineEntry()
 	m.inventoryReportEntry.SetText("Capture a room and validate inventory to see the report.")
 	m.inventoryReportEntry.Wrapping = fyne.TextWrapWord
-	m.inventoryReportEntry.SetMinRowsVisible(10)
+	m.inventoryReportEntry.SetMinRowsVisible(5)
 
 	inventoryReportContainer := m.createStyledMultiLineEntryContainer(m.inventoryReportEntry, "Inventory Validation")
 
 	content := container.NewVBox(
+		roomSummaryContainer,
+		roomItemsAndIdsContainer,
 		buttonsContainer,
 		inventoryReportContainer,
 	)
 
-	return m.createStyledContainerWithButtons(content, "Room Duplicator")
+	return m.createStyledContainerWithButtons(content, "Room Tools")
 }
 
-func (m *Manager) updateRoomDuplicatorContent() {
+type Orientation int
+
+const (
+	Vertical Orientation = iota
+	Horizontal
+)
+
+func (m *Manager) updateRoomToolsContent() {
 	if m.inventoryReportEntry != nil {
 		m.inventoryReportEntry.SetText(m.ValidateInventoryForCapture())
 	}
@@ -2670,21 +2534,147 @@ func (m *Manager) ExportRoomLayout(writer io.Writer) error {
 	return nil
 }
 
-func (m *Manager) ToggleRoomDuplicatorPopout() {
+func (m *Manager) ToggleRoomToolsPopout() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.roomDuplicatorPopout == nil {
-		m.roomDuplicatorPopout = m.createRoomDuplicatorContent()
+	if m.roomToolsPopout == nil {
+		m.roomToolsPopout = m.createRoomToolsContent()
 	}
 
-	if m.roomDuplicatorPopout.Visible() {
-		m.roomDuplicatorPopout.Hide()
+	if m.roomToolsPopout.Visible() {
+		m.roomToolsPopout.Hide()
 		m.window.Resize(fyne.NewSize(800, 600)) // Resize to original state when hidden
 	} else {
-		m.roomDuplicatorPopout.Show()
-		m.window.Resize(fyne.NewSize(800, 800)) // Resize to show the room duplicator popout
-		m.updateRoomDuplicatorContent()
+		m.roomToolsPopout.Show()
+		m.window.Resize(fyne.NewSize(800, 800)) // Resize to show the room tools popout
+		m.updateRoomToolsContent()
 	}
 	m.window.Content().Refresh()
+}
+
+type CustomSplit struct {
+	widget.BaseWidget
+	orientation Orientation
+	offset      float64
+	Leading     fyne.CanvasObject
+	Trailing    fyne.CanvasObject
+	minSize     fyne.Size
+}
+
+func (c *CustomSplit) Visible() bool {
+	return c.offset > 0 && c.offset < 1
+}
+
+func NewCustomSplit(orientation Orientation, leading, trailing fyne.CanvasObject) *CustomSplit {
+	split := &CustomSplit{
+		orientation: orientation,
+		offset:      0.5,
+		Leading:     leading,
+		Trailing:    trailing,
+	}
+	split.ExtendBaseWidget(split)
+	split.updateMinSize()
+	return split
+}
+
+func (c *CustomSplit) updateMinSize() {
+	if c.orientation == Horizontal {
+		c.minSize = fyne.NewSize(
+			c.Leading.MinSize().Width+c.Trailing.MinSize().Width,
+			fyne.Max(c.Leading.MinSize().Height, c.Trailing.MinSize().Height),
+		)
+	} else {
+		c.minSize = fyne.NewSize(
+			fyne.Max(c.Leading.MinSize().Width, c.Trailing.MinSize().Width),
+			c.Leading.MinSize().Height+c.Trailing.MinSize().Height,
+		)
+	}
+}
+
+func (c *CustomSplit) Resize(size fyne.Size) {
+	c.BaseWidget.Resize(size)
+	c.updateChildrenPositions()
+}
+
+func (c *CustomSplit) updateChildrenPositions() {
+	size := c.Size()
+	if c.orientation == Horizontal {
+		leadingWidth := int(float64(size.Width) * c.offset)
+		c.Leading.Resize(fyne.NewSize(float32(leadingWidth), size.Height))
+		c.Leading.Move(fyne.NewPos(0, 0))
+		c.Trailing.Resize(fyne.NewSize(float32(int(size.Width)-leadingWidth), size.Height))
+		c.Trailing.Move(fyne.NewPos(float32(leadingWidth), 0))
+	} else {
+		leadingHeight := int(float64(size.Height) * c.offset)
+		c.Leading.Resize(fyne.NewSize(size.Width, float32(leadingHeight)))
+		c.Leading.Move(fyne.NewPos(0, 0))
+		c.Trailing.Resize(fyne.NewSize(size.Width, float32(int(size.Height)-leadingHeight)))
+		c.Trailing.Move(fyne.NewPos(0, float32(leadingHeight)))
+	}
+}
+
+func (c *CustomSplit) CreateRenderer() fyne.WidgetRenderer {
+	return &customSplitRenderer{
+		split:   c,
+		divider: &canvas.Rectangle{FillColor: color.Transparent},
+	}
+}
+
+type customSplitRenderer struct {
+	split    *CustomSplit
+	divider  *canvas.Rectangle
+	lastSize fyne.Size
+}
+
+func (r *customSplitRenderer) MinSize() fyne.Size {
+	return r.split.minSize
+}
+
+func (r *customSplitRenderer) Layout(size fyne.Size) {
+	r.lastSize = size
+	r.layoutObjects(size)
+}
+
+func (r *customSplitRenderer) layoutObjects(size fyne.Size) {
+	if r.split.orientation == Horizontal {
+		r.layoutHorizontal(size)
+	} else {
+		r.layoutVertical(size)
+	}
+}
+
+func (c *CustomSplit) MinSize() fyne.Size {
+	return c.minSize
+}
+
+func (r *customSplitRenderer) layoutHorizontal(size fyne.Size) {
+	leadingWidth := int(float64(size.Width) * r.split.offset)
+	r.split.Leading.Resize(fyne.NewSize(float32(leadingWidth), size.Height))
+	r.split.Leading.Move(fyne.NewPos(0, 0))
+	r.split.Trailing.Resize(fyne.NewSize(float32(int(size.Width)-leadingWidth), size.Height))
+	r.split.Trailing.Move(fyne.NewPos(float32(leadingWidth), 0))
+}
+
+func (r *customSplitRenderer) layoutVertical(size fyne.Size) {
+	leadingHeight := int(float64(size.Height) * r.split.offset)
+	r.split.Leading.Resize(fyne.NewSize(size.Width, float32(leadingHeight)))
+	r.split.Leading.Move(fyne.NewPos(0, 0))
+	r.split.Trailing.Resize(fyne.NewSize(size.Width, float32(int(size.Height)-leadingHeight)))
+	r.split.Trailing.Move(fyne.NewPos(0, float32(leadingHeight)))
+}
+
+func (r *customSplitRenderer) Refresh() {
+	r.Layout(r.lastSize)
+}
+
+func (r *customSplitRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.split.Leading, r.split.Trailing, r.divider}
+}
+
+func (r *customSplitRenderer) Destroy() {}
+
+func (c *CustomSplit) SetOffset(offset float64) {
+	c.offset = offset
+	c.Refresh()
 }

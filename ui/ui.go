@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/draw"
+	"image/png"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -1222,32 +1223,27 @@ func (m *Manager) Run() {
 	m.window = m.app.NewWindow("G-itemViewer")
 	m.mu.Unlock()
 
-	inventoryTab := m.setupInventoryTab()
+	// Create the header (image or fallback text)
+	header := m.createHeader("teleport.png") // Replace with your actual image filename
 
-	tabs := NewCustomTabContainer(m, "Inventory")
-	m.scanButton = tabs.scanButton
-	tabs.Refresh()
-
-	content := container.NewMax()
-
-	updateContent := func() {
-		content.Objects = []fyne.CanvasObject{inventoryTab}
-		tabs.scanButton.OnTapped = func() {
-			if m.scanCallback != nil {
-				m.scanCallback()
-			}
+	// Use the existing scanButton creation
+	m.scanButton = newCustomScanButton(loadScanIconInactive(), func() {
+		if m.scanCallback != nil {
+			m.scanCallback()
 		}
-		content.Refresh()
-	}
+	})
 
-	updateContent()
+	// Arrange the header and scan button
+	topContainer := container.NewBorder(nil, nil, nil, m.scanButton, header)
 
-	tabs.OnChanged = updateContent
+	// Setup the inventory content
+	inventoryContent := m.setupInventoryContent()
 
+	// Main container with header, scan button, and inventory content
 	mainContainer := container.NewBorder(
-		tabs,
+		topContainer,
 		nil, nil, nil,
-		content,
+		inventoryContent,
 	)
 
 	m.inventoryPopout = m.createInventoryContent()
@@ -1280,6 +1276,24 @@ func (m *Manager) Run() {
 
 	m.window.ShowAndRun()
 }
+
+func (m *Manager) createHeader(imagePath string) fyne.CanvasObject {
+	log.Printf("Creating header with image: %s", imagePath)
+	header, err := NewImageHeader(imagePath)
+	if err != nil {
+		log.Printf("Failed to load header image: %v", err)
+		// Fallback to a text header if image loading fails
+		return widget.NewLabel("Inventory")
+	}
+
+	// Wrap the header in a container with fixed height
+	return container.NewStack(
+		header,
+		layout.NewSpacer(), // This will make the container expand to fill available space
+		container.NewWithoutLayout(header),
+	)
+}
+
 func (m *Manager) createTradeManagerContent() *fyne.Container {
 	if m.tradeOfferContainer == nil {
 		m.tradeOfferContainer = container.NewGridWrap(fyne.NewSize(36, 36))
@@ -2806,147 +2820,121 @@ func (r *borderedContainerRenderer) Refresh() {
 	canvas.Refresh(r.container)
 }
 
-func createRepeatedImage(img *canvas.Image, size fyne.Size) *image.RGBA {
-	bounds := image.Rect(0, 0, int(size.Width), int(size.Height))
-	repeatedImg := image.NewRGBA(bounds)
-	draw.Draw(repeatedImg, bounds, img.Image, image.Point{}, draw.Src)
-	return repeatedImg
-}
-
-type alternatingLinesRenderer struct {
-	lines *alternatingLines
-}
-
-func (r *alternatingLinesRenderer) Destroy() {}
-
-func (r *alternatingLinesRenderer) Layout(size fyne.Size) {
-	r.lines.Resize(size)
-	r.lines.Refresh()
-}
-
-func (r *alternatingLinesRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(1, 2) // Minimum size to show both lines
-}
-
-func (r *alternatingLinesRenderer) Objects() []fyne.CanvasObject {
-	return r.lines.lines
-}
-
-func (r *alternatingLinesRenderer) Refresh() {
-	r.lines.Refresh()
-	canvas.Refresh(r.lines)
-}
-
-func newAlternatingLines(color1, color2 color.Color) *alternatingLines {
-	lines := &alternatingLines{color1: color1, color2: color2}
-	lines.ExtendBaseWidget(lines)
-	return lines
-}
-
-type alternatingLines struct {
+type ImageHeader struct {
 	widget.BaseWidget
-	color1, color2 color.Color
-	lines          []fyne.CanvasObject
+	image *canvas.Image
 }
 
-func (a *alternatingLines) CreateRenderer() fyne.WidgetRenderer {
-	a.ExtendBaseWidget(a)
-	a.Refresh()
-	return &alternatingLinesRenderer{lines: a}
-}
-
-func (a *alternatingLines) Refresh() {
-	a.lines = nil // Clear existing lines
-	size := a.Size()
-	for y := 0; y < int(size.Height); y++ {
-		lineColor := a.color1
-		if y%2 != 0 {
-			lineColor = a.color2
-		}
-		line := canvas.NewLine(lineColor)
-		line.StrokeWidth = 1
-		line.Position1 = fyne.NewPos(0, float32(y))
-		line.Position2 = fyne.NewPos(size.Width, float32(y))
-		a.lines = append(a.lines, line)
-	}
-}
-
-type texturedBackground struct {
-	widget.BaseWidget
-	texture image.Image
-}
-
-func newTexturedBackground() (*texturedBackground, error) {
-	textureImg, err := loadTextureImage()
+func NewImageHeader(imagePath string) (fyne.CanvasObject, error) {
+	fullURL := AssetServerBaseURL + imagePath
+	log.Printf("Loading image header from: %s", fullURL)
+	img, err := loadImageFromURL(fullURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load image: %v", err)
 	}
-	bg := &texturedBackground{
-		texture: textureImg,
-	}
-	bg.ExtendBaseWidget(bg)
-	return bg, nil
+
+	canvasImage := canvas.NewImageFromImage(img)
+	canvasImage.FillMode = canvas.ImageFillOriginal
+	canvasImage.ScaleMode = canvas.ImageScaleSmooth
+
+	log.Println("Image header created successfully")
+	return canvasImage, nil
 }
 
-func (t *texturedBackground) CreateRenderer() fyne.WidgetRenderer {
-	return &texturedBackgroundRenderer{
-		background: t,
-	}
+func (h *ImageHeader) CreateRenderer() fyne.WidgetRenderer {
+	return &imageHeaderRenderer{header: h}
 }
 
-type texturedBackgroundRenderer struct {
-	background *texturedBackground
-	canvas     *canvas.Image
+type imageHeaderRenderer struct {
+	header *ImageHeader
 }
 
-func (r *texturedBackgroundRenderer) Destroy() {}
-
-func (r *texturedBackgroundRenderer) Layout(size fyne.Size) {
-	if r.canvas != nil {
-		r.canvas.Resize(size)
-	}
+func (r *imageHeaderRenderer) MinSize() fyne.Size {
+	return r.header.image.MinSize()
 }
 
-func (r *texturedBackgroundRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(1, 1)
+func (r *imageHeaderRenderer) Layout(size fyne.Size) {
+	r.header.image.Resize(size)
 }
 
-func (r *texturedBackgroundRenderer) Objects() []fyne.CanvasObject {
-	if r.canvas == nil {
-		r.canvas = canvas.NewImageFromImage(r.createTiledImage(r.background.texture, r.background.Size()))
-	}
-	return []fyne.CanvasObject{r.canvas}
+func (r *imageHeaderRenderer) Refresh() {
+	canvas.Refresh(r.header.image)
 }
 
-func (r *texturedBackgroundRenderer) Refresh() {
-	if r.canvas != nil {
-		r.canvas.Image = r.createTiledImage(r.background.texture, r.background.Size())
-		r.canvas.Refresh()
-	}
+func (r *imageHeaderRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.header.image}
 }
 
-func (r *texturedBackgroundRenderer) createTiledImage(texture image.Image, size fyne.Size) image.Image {
-	bounds := texture.Bounds()
-	width, height := int(size.Width), int(size.Height)
-	tiled := image.NewRGBA(image.Rect(0, 0, width, height))
-	for y := 0; y < height; y += bounds.Dy() {
-		for x := 0; x < width; x += bounds.Dx() {
-			draw.Draw(tiled, image.Rect(x, y, x+bounds.Dx(), y+bounds.Dy()), texture, bounds.Min, draw.Over)
-		}
-	}
-	return tiled
-}
+func (r *imageHeaderRenderer) Destroy() {}
 
-func loadTextureImage() (image.Image, error) {
-	resp, err := http.Get(AssetServerBaseURL + "background.png") // Adjust the filename as needed
+func loadImageFromURL(url string) (image.Image, error) {
+	log.Printf("Attempting to load image from URL: %s", url)
+	resp, err := http.Get(url)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to GET image: %v", err)
 	}
 	defer resp.Body.Close()
 
-	img, _, err := image.Decode(resp.Body)
-	if err != nil {
-		return nil, err
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
+
+	img, err := png.Decode(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode PNG: %v", err)
+	}
+	log.Println("Image loaded successfully")
 	return img, nil
+}
+
+func (m *Manager) setupInventoryContent() fyne.CanvasObject {
+	m.inventoryText = widget.NewMultiLineEntry()
+	m.inventoryText.Wrapping = fyne.TextWrapWord
+	m.inventoryText.SetPlaceHolder("Open your Inventory and then click on Item icons to view more information.")
+	m.inventoryText.SetMinRowsVisible(10)
+
+	m.summaryText = widget.NewMultiLineEntry()
+	m.summaryText.Wrapping = fyne.TextWrapWord
+	m.summaryText.SetPlaceHolder("Click on 'Scan' to begin scanning your inventory!")
+	m.summaryText.SetMinRowsVisible(10)
+
+	summaryContainer := m.createStyledMultiLineEntryContainer(m.summaryText, "Inventory Summary")
+	idContainer := m.createStyledMultiLineEntryContainer(m.inventoryText, "Item Details")
+
+	// Create smaller buttons
+	openInventoryButton := widget.NewButton("Inventory", func() {
+		m.ToggleInventoryPopout()
+	})
+	openTradeManagerButton := widget.NewButton("Trade Manager", func() {
+		m.ToggleTradeManagerPopout()
+	})
+	openTradeLogButton := widget.NewButton("Trade Log", func() {
+		m.ToggleTradeLogPopout()
+	})
+	openRoomToolsButton := widget.NewButton("Room Tools", func() {
+		m.ToggleRoomToolsPopout()
+	})
+
+	// Set a smaller size for the buttons
+	buttonSize := fyne.NewSize(100, 30)
+	openInventoryButton.Resize(buttonSize)
+	openTradeManagerButton.Resize(buttonSize)
+	openTradeLogButton.Resize(buttonSize)
+	openRoomToolsButton.Resize(buttonSize)
+
+	// Create a horizontal container for the buttons
+	buttonsContainer := container.NewHBox(
+		layout.NewSpacer(),
+		openInventoryButton,
+		openTradeManagerButton,
+		openTradeLogButton,
+		openRoomToolsButton,
+		layout.NewSpacer(),
+	)
+
+	return container.NewVBox(
+		summaryContainer,
+		idContainer,
+		buttonsContainer,
+	)
 }

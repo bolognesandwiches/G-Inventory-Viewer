@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"image"
 	"image/color"
+	"image/draw"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -1220,27 +1222,6 @@ func (m *Manager) Run() {
 	m.window = m.app.NewWindow("G-itemViewer")
 	m.mu.Unlock()
 
-	leftIcon, _ := m.loadImage("left_icon.png")
-	rightIcon, _ := m.loadImage("right_icon.png")
-	leftIconImage := canvas.NewImageFromResource(leftIcon)
-	rightIconImage := canvas.NewImageFromResource(rightIcon)
-	leftIconImage.Resize(fyne.NewSize(100, 27))
-	rightIconImage.Resize(fyne.NewSize(100, 27))
-	leftIconImage.SetMinSize(fyne.NewSize(100, 27))
-	rightIconImage.SetMinSize(fyne.NewSize(100, 27))
-
-	titleText := canvas.NewText("G-itemViewer", color.White)
-	titleText.Alignment = fyne.TextAlignCenter
-	titleText.TextStyle = fyne.TextStyle{Bold: true}
-
-	header := container.NewHBox(
-		leftIconImage,
-		layout.NewSpacer(),
-		titleText,
-		layout.NewSpacer(),
-		rightIconImage,
-	)
-
 	inventoryTab := m.setupInventoryTab()
 
 	tabs := NewCustomTabContainer(m, "Inventory")
@@ -1264,10 +1245,7 @@ func (m *Manager) Run() {
 	tabs.OnChanged = updateContent
 
 	mainContainer := container.NewBorder(
-		container.NewVBox(
-			header,
-			tabs,
-		),
+		tabs,
 		nil, nil, nil,
 		content,
 	)
@@ -1293,9 +1271,12 @@ func (m *Manager) Run() {
 		mainContainer,
 	)
 
-	m.window.SetContent(mainLayout)
+	// Create the bordered container
+	borderedContainer := NewBorderedContainer(mainLayout, 4) // Using scale factor 4
+
+	m.window.SetContent(borderedContainer)
 	m.window.Resize(fyne.NewSize(300, 600))
-	m.window.SetPadded(true)
+	m.window.SetPadded(false)
 
 	m.window.ShowAndRun()
 }
@@ -1760,7 +1741,7 @@ type habboTheme struct{}
 func (m *habboTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
 	case theme.ColorNameBackground:
-		return color.NRGBA{R: 103, G: 148, B: 167, A: 255}
+		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNameForeground:
 		return color.Black
 	case theme.ColorNamePrimary:
@@ -2727,4 +2708,245 @@ func (r *customSplitRenderer) Destroy() {}
 func (c *CustomSplit) SetOffset(offset float64) {
 	c.offset = offset
 	c.Refresh()
+}
+
+type BorderedContainer struct {
+	widget.BaseWidget
+	Content fyne.CanvasObject
+
+	topImage, bottomImage, leftImage, rightImage                   *canvas.Image
+	topLeftImage, topRightImage, bottomLeftImage, bottomRightImage *canvas.Image
+
+	scaleFactor float32
+}
+
+func NewBorderedContainer(content fyne.CanvasObject, scaleFactor float32) *BorderedContainer {
+	c := &BorderedContainer{
+		Content:     content,
+		scaleFactor: scaleFactor,
+	}
+	c.ExtendBaseWidget(c)
+
+	// Load your images here
+	c.topImage = canvas.NewImageFromFile("assets/silver/top.png")
+	c.bottomImage = canvas.NewImageFromFile("assets/silver/bottom.png")
+	c.leftImage = canvas.NewImageFromFile("assets/silver/left.png")
+	c.rightImage = canvas.NewImageFromFile("assets/silver/right.png")
+	c.topLeftImage = canvas.NewImageFromFile("assets/silver/topleft.png")
+	c.topRightImage = canvas.NewImageFromFile("assets/silver/topright.png")
+	c.bottomLeftImage = canvas.NewImageFromFile("assets/silver/bottomleft.png")
+	c.bottomRightImage = canvas.NewImageFromFile("assets/silver/bottomright.png")
+
+	return c
+}
+
+func (c *BorderedContainer) CreateRenderer() fyne.WidgetRenderer {
+	return &borderedContainerRenderer{
+		container: c,
+	}
+}
+
+type borderedContainerRenderer struct {
+	container *BorderedContainer
+}
+
+func (r *borderedContainerRenderer) Destroy() {}
+
+func (r *borderedContainerRenderer) Layout(size fyne.Size) {
+	c := r.container
+	borderSize := theme.Padding() * 2 * c.scaleFactor // Adjust border size based on scale factor
+
+	// Corner images
+	cornerSize := fyne.NewSize(borderSize, borderSize)
+	c.topLeftImage.Resize(cornerSize)
+	c.topLeftImage.Move(fyne.NewPos(0, 0))
+
+	c.topRightImage.Resize(cornerSize)
+	c.topRightImage.Move(fyne.NewPos(size.Width-borderSize, 0))
+
+	c.bottomLeftImage.Resize(cornerSize)
+	c.bottomLeftImage.Move(fyne.NewPos(0, size.Height-borderSize))
+
+	c.bottomRightImage.Resize(cornerSize)
+	c.bottomRightImage.Move(fyne.NewPos(size.Width-borderSize, size.Height-borderSize))
+
+	// Side images
+	c.topImage.Resize(fyne.NewSize(size.Width-2*borderSize, borderSize))
+	c.topImage.Move(fyne.NewPos(borderSize, 0))
+
+	c.bottomImage.Resize(fyne.NewSize(size.Width-2*borderSize, borderSize))
+	c.bottomImage.Move(fyne.NewPos(borderSize, size.Height-borderSize))
+
+	c.leftImage.Resize(fyne.NewSize(borderSize, size.Height-2*borderSize))
+	c.leftImage.Move(fyne.NewPos(0, borderSize))
+
+	c.rightImage.Resize(fyne.NewSize(borderSize, size.Height-2*borderSize))
+	c.rightImage.Move(fyne.NewPos(size.Width-borderSize, borderSize))
+
+	// Position main content
+	contentSize := size.Subtract(fyne.NewSize(2*borderSize, 2*borderSize))
+	c.Content.Resize(contentSize)
+	c.Content.Move(fyne.NewPos(borderSize, borderSize))
+}
+
+func (r *borderedContainerRenderer) MinSize() fyne.Size {
+	borderSize := theme.Padding() * 2 * r.container.scaleFactor
+	return r.container.Content.MinSize().Add(fyne.NewSize(borderSize*2, borderSize*2))
+}
+func (r *borderedContainerRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{
+		r.container.Content,
+		r.container.topImage, r.container.bottomImage, r.container.leftImage, r.container.rightImage,
+		r.container.topLeftImage, r.container.topRightImage, r.container.bottomLeftImage, r.container.bottomRightImage,
+	}
+}
+
+func (r *borderedContainerRenderer) Refresh() {
+	r.Layout(r.container.Size())
+	canvas.Refresh(r.container)
+}
+
+func createRepeatedImage(img *canvas.Image, size fyne.Size) *image.RGBA {
+	bounds := image.Rect(0, 0, int(size.Width), int(size.Height))
+	repeatedImg := image.NewRGBA(bounds)
+	draw.Draw(repeatedImg, bounds, img.Image, image.Point{}, draw.Src)
+	return repeatedImg
+}
+
+type alternatingLinesRenderer struct {
+	lines *alternatingLines
+}
+
+func (r *alternatingLinesRenderer) Destroy() {}
+
+func (r *alternatingLinesRenderer) Layout(size fyne.Size) {
+	r.lines.Resize(size)
+	r.lines.Refresh()
+}
+
+func (r *alternatingLinesRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(1, 2) // Minimum size to show both lines
+}
+
+func (r *alternatingLinesRenderer) Objects() []fyne.CanvasObject {
+	return r.lines.lines
+}
+
+func (r *alternatingLinesRenderer) Refresh() {
+	r.lines.Refresh()
+	canvas.Refresh(r.lines)
+}
+
+func newAlternatingLines(color1, color2 color.Color) *alternatingLines {
+	lines := &alternatingLines{color1: color1, color2: color2}
+	lines.ExtendBaseWidget(lines)
+	return lines
+}
+
+type alternatingLines struct {
+	widget.BaseWidget
+	color1, color2 color.Color
+	lines          []fyne.CanvasObject
+}
+
+func (a *alternatingLines) CreateRenderer() fyne.WidgetRenderer {
+	a.ExtendBaseWidget(a)
+	a.Refresh()
+	return &alternatingLinesRenderer{lines: a}
+}
+
+func (a *alternatingLines) Refresh() {
+	a.lines = nil // Clear existing lines
+	size := a.Size()
+	for y := 0; y < int(size.Height); y++ {
+		lineColor := a.color1
+		if y%2 != 0 {
+			lineColor = a.color2
+		}
+		line := canvas.NewLine(lineColor)
+		line.StrokeWidth = 1
+		line.Position1 = fyne.NewPos(0, float32(y))
+		line.Position2 = fyne.NewPos(size.Width, float32(y))
+		a.lines = append(a.lines, line)
+	}
+}
+
+type texturedBackground struct {
+	widget.BaseWidget
+	texture image.Image
+}
+
+func newTexturedBackground() (*texturedBackground, error) {
+	textureImg, err := loadTextureImage()
+	if err != nil {
+		return nil, err
+	}
+	bg := &texturedBackground{
+		texture: textureImg,
+	}
+	bg.ExtendBaseWidget(bg)
+	return bg, nil
+}
+
+func (t *texturedBackground) CreateRenderer() fyne.WidgetRenderer {
+	return &texturedBackgroundRenderer{
+		background: t,
+	}
+}
+
+type texturedBackgroundRenderer struct {
+	background *texturedBackground
+	canvas     *canvas.Image
+}
+
+func (r *texturedBackgroundRenderer) Destroy() {}
+
+func (r *texturedBackgroundRenderer) Layout(size fyne.Size) {
+	if r.canvas != nil {
+		r.canvas.Resize(size)
+	}
+}
+
+func (r *texturedBackgroundRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(1, 1)
+}
+
+func (r *texturedBackgroundRenderer) Objects() []fyne.CanvasObject {
+	if r.canvas == nil {
+		r.canvas = canvas.NewImageFromImage(r.createTiledImage(r.background.texture, r.background.Size()))
+	}
+	return []fyne.CanvasObject{r.canvas}
+}
+
+func (r *texturedBackgroundRenderer) Refresh() {
+	if r.canvas != nil {
+		r.canvas.Image = r.createTiledImage(r.background.texture, r.background.Size())
+		r.canvas.Refresh()
+	}
+}
+
+func (r *texturedBackgroundRenderer) createTiledImage(texture image.Image, size fyne.Size) image.Image {
+	bounds := texture.Bounds()
+	width, height := int(size.Width), int(size.Height)
+	tiled := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y += bounds.Dy() {
+		for x := 0; x < width; x += bounds.Dx() {
+			draw.Draw(tiled, image.Rect(x, y, x+bounds.Dx(), y+bounds.Dy()), texture, bounds.Min, draw.Over)
+		}
+	}
+	return tiled
+}
+
+func loadTextureImage() (image.Image, error) {
+	resp, err := http.Get(AssetServerBaseURL + "background.png") // Adjust the filename as needed
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	img, _, err := image.Decode(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return img, nil
 }

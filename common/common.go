@@ -109,13 +109,15 @@ func GetIconURL(classname string, itemType string, props string) string {
 }
 
 var specialNameMappings = map[string]string{
-	"Habbo Cola Machine":     "Cola Machine",
-	"Bonnie Blonde's Pillow": "Purple Velvet Pillow",
-	"Imperial Teleport":      "Imperial Teleports",
-	"poster_5003":            "Purple Garland",
-	"poster_5000":            "Green Garland",
-	"Club sofa":              "Club Sofa",
-	"Dicemaster":             "Dice Master",
+	"Habbo Cola Machine":        "Cola Machine",
+	"Bonnie Blonde's Pillow":    "Purple Velvet Pillow",
+	"Imperial Teleport":         "Imperial Teleports",
+	"poster_5003":               "Purple Garland",
+	"poster_5000":               "green garland",
+	"Club sofa":                 "Club Sofa",
+	"Dicemaster":                "Dice Master",
+	"Vanilla Ice Cream Machine": "Gold icecream maker",
+	"doorE":                     "Green Teleport",
 }
 
 func GetHCValue(itemName string) float64 {

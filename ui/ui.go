@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/png"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -657,12 +655,12 @@ func (m *Manager) createGroupedItemButton(items []UnifiedItem) *widget.Button {
 
 func (m *Manager) createStyledContainerWithButtons(content fyne.CanvasObject, title string) *fyne.Container {
 	// Create the background with rounded corners
-	background := canvas.NewRectangle(color.NRGBA{R: 212, G: 221, B: 225, A: 255})
-	background.StrokeColor = color.Black
-	background.StrokeWidth = 1.35
+	background := canvas.NewRectangle(color.NRGBA{R: 42, G: 42, B: 42, A: 255})
+	background.StrokeColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
+	background.StrokeWidth = 2
 	background.CornerRadius = 5
 
-	titleText := canvas.NewText(title, color.Black)
+	titleText := canvas.NewText(title, color.NRGBA{R: 128, G: 128, B: 128, A: 255})
 	titleText.Alignment = fyne.TextAlignCenter
 	titleText.TextStyle = fyne.TextStyle{Bold: true}
 
@@ -1224,24 +1222,14 @@ func (m *Manager) Run() {
 	m.mu.Unlock()
 
 	// Create the header (image or fallback text)
-	header := m.createHeader("teleport.png") // Replace with your actual image filename
-
-	// Use the existing scanButton creation
-	m.scanButton = newCustomScanButton(loadScanIconInactive(), func() {
-		if m.scanCallback != nil {
-			m.scanCallback()
-		}
-	})
-
-	// Arrange the header and scan button
-	topContainer := container.NewBorder(nil, nil, nil, m.scanButton, header)
+	header := m.createHeader("teleport.png")
 
 	// Setup the inventory content
 	inventoryContent := m.setupInventoryContent()
 
-	// Main container with header, scan button, and inventory content
+	// Main container with header and inventory content
 	mainContainer := container.NewBorder(
-		topContainer,
+		header,
 		nil, nil, nil,
 		inventoryContent,
 	)
@@ -1278,10 +1266,8 @@ func (m *Manager) Run() {
 }
 
 func (m *Manager) createHeader(imagePath string) fyne.CanvasObject {
-	log.Printf("Creating header with image: %s", imagePath)
 	header, err := NewImageHeader(imagePath)
 	if err != nil {
-		log.Printf("Failed to load header image: %v", err)
 		// Fallback to a text header if image loading fails
 		return widget.NewLabel("Inventory")
 	}
@@ -1711,7 +1697,7 @@ func (r *customTabRenderer) Refresh() {
 	} else {
 		r.background.FillColor = color.NRGBA{R: 136, G: 173, B: 189, A: 255}
 	}
-	r.text.Color = color.Black
+	r.text.Color = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
 	r.outline.StrokeColor = color.Black
 	r.outline.StrokeWidth = 5
 	r.outline.FillColor = color.Transparent
@@ -1757,29 +1743,29 @@ func (m *habboTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 	case theme.ColorNameBackground:
 		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNameForeground:
-		return color.Black
+		return color.NRGBA{R: 128, G: 128, B: 128, A: 255}
 	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 192, G: 192, B: 192, A: 255}
+		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNameButton:
 		return color.NRGBA{R: 192, G: 192, B: 192, A: 255}
 	case theme.ColorNameDisabled:
-		return color.NRGBA{R: 212, G: 221, B: 225, A: 255}
+		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNamePlaceHolder:
 		return color.NRGBA{R: 0x80, G: 0x80, B: 0x80, A: 0xFF}
 	case theme.ColorNameScrollBar:
-		return color.NRGBA{R: 0xB0, G: 0xB0, B: 0xB0, A: 0xFF}
+		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNameInputBackground:
-		return color.NRGBA{R: 218, G: 218, B: 218, A: 255}
+		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNamePressed:
 		return color.NRGBA{R: 99, G: 192, B: 127, A: 255}
 	case theme.ColorNameShadow:
-		return color.NRGBA{R: 103, G: 148, B: 167, A: 255}
+		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNameHover:
-		return color.NRGBA{R: 99, G: 192, B: 127, A: 255}
+		return color.NRGBA{R: 252, G: 100, B: 52, A: 255}
 	case theme.ColorNameFocus:
 		return color.White
 	default:
-		return color.NRGBA{R: 103, G: 148, B: 167, A: 255} // Set default color
+		return color.NRGBA{R: 42, G: 42, B: 42, A: 255} // Set default color
 	}
 }
 
@@ -1884,14 +1870,15 @@ func (m *Manager) showTradeConfirmationDialog() {
 }
 
 func (m *Manager) createStyledScrollContainer(content fyne.CanvasObject, title string) *fyne.Container {
-	background := canvas.NewRectangle(color.NRGBA{R: 212, G: 221, B: 225, A: 255})
-	background.StrokeColor = color.Black
-	background.StrokeWidth = 1.35
+	background := canvas.NewRectangle(color.NRGBA{R: 42, G: 42, B: 42, A: 255})
+	background.StrokeColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
+	background.StrokeWidth = 2
 	background.CornerRadius = 5
 
-	titleText := canvas.NewText(title, color.Black)
+	titleText := canvas.NewText(title, color.NRGBA{R: 128, G: 128, B: 128, A: 255})
 	titleText.Alignment = fyne.TextAlignCenter
 	titleText.TextStyle = fyne.TextStyle{Bold: true}
+	titleText.Color = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
 
 	scrollContainer := container.NewScroll(content)
 	scrollContainer.SetMinSize(fyne.NewSize(0, 150)) // Adjust the height as needed
@@ -1906,12 +1893,12 @@ func (m *Manager) createStyledScrollContainer(content fyne.CanvasObject, title s
 }
 
 func (m *Manager) createStyledMultiLineEntryContainer(content *widget.Entry, title string) *fyne.Container {
-	background := canvas.NewRectangle(color.NRGBA{R: 212, G: 221, B: 225, A: 255})
-	background.StrokeColor = color.Black
-	background.StrokeWidth = 1.35
+	background := canvas.NewRectangle(color.NRGBA{R: 42, G: 42, B: 42, A: 255})
+	background.StrokeColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
+	background.StrokeWidth = 2
 	background.CornerRadius = 5
 
-	titleText := canvas.NewText(title, color.Black)
+	titleText := canvas.NewText(title, color.NRGBA{R: 128, G: 128, B: 128, A: 255})
 	titleText.Alignment = fyne.TextAlignCenter
 	titleText.TextStyle = fyne.TextStyle{Bold: true}
 
@@ -2741,17 +2728,26 @@ func NewBorderedContainer(content fyne.CanvasObject, scaleFactor float32) *Borde
 	}
 	c.ExtendBaseWidget(c)
 
+	baseURL := AssetServerBaseURL + "silver/"
+
 	// Load your images here
-	c.topImage = canvas.NewImageFromFile("assets/silver/top.png")
-	c.bottomImage = canvas.NewImageFromFile("assets/silver/bottom.png")
-	c.leftImage = canvas.NewImageFromFile("assets/silver/left.png")
-	c.rightImage = canvas.NewImageFromFile("assets/silver/right.png")
-	c.topLeftImage = canvas.NewImageFromFile("assets/silver/topleft.png")
-	c.topRightImage = canvas.NewImageFromFile("assets/silver/topright.png")
-	c.bottomLeftImage = canvas.NewImageFromFile("assets/silver/bottomleft.png")
-	c.bottomRightImage = canvas.NewImageFromFile("assets/silver/bottomright.png")
+	c.topImage = mustLoadCanvasImage(baseURL + "top.png")
+	c.bottomImage = mustLoadCanvasImage(baseURL + "bottom.png")
+	c.leftImage = mustLoadCanvasImage(baseURL + "left.png")
+	c.rightImage = mustLoadCanvasImage(baseURL + "right.png")
+	c.topLeftImage = mustLoadCanvasImage(baseURL + "topleft.png")
+	c.topRightImage = mustLoadCanvasImage(baseURL + "topright.png")
+	c.bottomLeftImage = mustLoadCanvasImage(baseURL + "bottomleft.png")
+	c.bottomRightImage = mustLoadCanvasImage(baseURL + "bottomright.png")
 
 	return c
+}
+
+func mustLoadCanvasImage(url string) *canvas.Image {
+	img, err := loadImageFromURL(url)
+	if err != nil {
+	}
+	return canvas.NewImageFromImage(img)
 }
 
 func (c *BorderedContainer) CreateRenderer() fyne.WidgetRenderer {
@@ -2827,7 +2823,6 @@ type ImageHeader struct {
 
 func NewImageHeader(imagePath string) (fyne.CanvasObject, error) {
 	fullURL := AssetServerBaseURL + imagePath
-	log.Printf("Loading image header from: %s", fullURL)
 	img, err := loadImageFromURL(fullURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load image: %v", err)
@@ -2837,7 +2832,6 @@ func NewImageHeader(imagePath string) (fyne.CanvasObject, error) {
 	canvasImage.FillMode = canvas.ImageFillOriginal
 	canvasImage.ScaleMode = canvas.ImageScaleSmooth
 
-	log.Println("Image header created successfully")
 	return canvasImage, nil
 }
 
@@ -2868,22 +2862,17 @@ func (r *imageHeaderRenderer) Objects() []fyne.CanvasObject {
 func (r *imageHeaderRenderer) Destroy() {}
 
 func loadImageFromURL(url string) (image.Image, error) {
-	log.Printf("Attempting to load image from URL: %s", url)
 	resp, err := http.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("failed to GET image: %v", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	img, _, err := image.Decode(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	img, err := png.Decode(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode PNG: %v", err)
-	}
-	log.Println("Image loaded successfully")
 	return img, nil
 }
 
@@ -2901,7 +2890,12 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 	summaryContainer := m.createStyledMultiLineEntryContainer(m.summaryText, "Inventory Summary")
 	idContainer := m.createStyledMultiLineEntryContainer(m.inventoryText, "Item Details")
 
-	// Create smaller buttons
+	// Create buttons
+	scanButton := widget.NewButton("Scan", func() {
+		if m.scanCallback != nil {
+			m.scanCallback()
+		}
+	})
 	openInventoryButton := widget.NewButton("Inventory", func() {
 		m.ToggleInventoryPopout()
 	})
@@ -2917,6 +2911,7 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 
 	// Set a smaller size for the buttons
 	buttonSize := fyne.NewSize(100, 30)
+	scanButton.Resize(buttonSize)
 	openInventoryButton.Resize(buttonSize)
 	openTradeManagerButton.Resize(buttonSize)
 	openTradeLogButton.Resize(buttonSize)
@@ -2925,6 +2920,7 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 	// Create a horizontal container for the buttons
 	buttonsContainer := container.NewHBox(
 		layout.NewSpacer(),
+		scanButton,
 		openInventoryButton,
 		openTradeManagerButton,
 		openTradeLogButton,

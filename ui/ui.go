@@ -129,6 +129,7 @@ type Manager struct {
 	profileSearchEntry         *widget.Entry
 	profileSearchResultText    *widget.Entry
 	currentRoomInfo            *room.Info
+	scanEnabled                bool
 }
 
 func NewUnifiedInventory() *UnifiedInventory {
@@ -444,18 +445,17 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 		yourTradeOffer:    make(map[string]int),
 		theirTradeOffer:   make(map[string]int),
 		unifiedInventory:  NewUnifiedInventory(),
-		iconContainer:     container.NewGridWrap(fyne.NewSize(36, 36)), // Ensure this is initialized
-		roomSummaryMu:     sync.RWMutex{},                              // Initialize the mutex
+		iconContainer:     container.NewGridWrap(fyne.NewSize(36, 36)),
+		roomSummaryMu:     sync.RWMutex{},
+		scanEnabled:       false,
 	}
 
 	// Register handlers for inventory changes
 	invManager.Updated(func() {
 		currentItems := invManager.Items()
 		if len(m.unifiedInventory.Items) == 0 {
-			// Initial scan
 			m.handleInitialInventoryUpdate(currentItems)
 		} else {
-			// Check for new items (pickups)
 			for id, item := range currentItems {
 				if !m.unifiedInventory.ItemExists(id) {
 					m.HandleItemAddition(item)
@@ -478,34 +478,34 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 
 	roomManager.ObjectAdded(func(args room.ObjectArgs) {
 		m.AddItemToRoom(args.Object)
+		m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 	})
 
 	roomManager.ObjectRemoved(func(args room.ObjectArgs) {
 		m.RemoveItemFromRoom(args.Object.Id)
+		m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 	})
 
 	roomManager.ObjectsLoaded(func(args room.ObjectsArgs) {
-
+		m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 	})
 
 	roomManager.ItemsLoaded(func(args room.ItemsArgs) {
+		m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 
-		// Now that we have all the data, let's send it to the API
 		if m.currentRoomInfo != nil {
 			err := m.SendRoomScanData(*m.currentRoomInfo, m.roomManager.Objects, m.roomManager.Items)
 			if err != nil {
-			} else {
+				// Handle error (e.g., log it)
 			}
-		} else {
 		}
 	})
-	// Set up the Entered event handler
+
 	roomManager.Entered(func(args room.Args) {
 		m.currentRoomInfo = args.Info
 		if m.currentRoomInfo != nil {
-		} else {
+			// Log or handle the room entry
 		}
-
 	})
 
 	return m
@@ -514,14 +514,14 @@ func (m *Manager) AddItemToRoom(item room.Object) {
 	m.roomSummary.mu.Lock()
 	defer m.roomSummary.mu.Unlock()
 	m.roomSummary.Items[item.Id] = item
-	m.UpdateRoomSummaryDisplay()
+	m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 }
 
 func (m *Manager) RemoveItemFromRoom(itemId int) {
 	m.roomSummary.mu.Lock()
 	defer m.roomSummary.mu.Unlock()
 	delete(m.roomSummary.Items, itemId)
-	m.UpdateRoomSummaryDisplay()
+	m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 }
 
 func (m *Manager) UpdateRoomSummaryDisplay() {
@@ -1218,9 +1218,8 @@ func (m *Manager) isCurrentUser(name string) bool {
 }
 
 func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]room.Item) {
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.UpdateRoomDisplayLock.Lock()
+	defer m.UpdateRoomDisplayLock.Unlock()
 
 	m.roomSummary.mu.Lock()
 	m.roomSummary.Items = objects
@@ -1230,13 +1229,7 @@ func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]r
 		m.updateRoomDisplayFunc(objects, items)
 	}
 
-	if m.currentRoomInfo != nil {
-		err := m.SendRoomScanData(*m.currentRoomInfo, objects, items)
-		if err != nil {
-		} else {
-		}
-	} else {
-	}
+	// Don't send room scan data here, as it might be called too frequently
 }
 func (m *Manager) UpdateRoomDisplayAfterPickup() {
 	m.UpdateRoomDisplayLock.Lock()
@@ -2408,6 +2401,7 @@ func (m *Manager) createRoomToolsContent() *fyne.Container {
 
 		m.roomIconContainer.Refresh()
 
+		// Update the room summary text
 		m.roomSummaryText.SetText(common.GetRoomSummary(objects, items))
 
 		var itemIDs strings.Builder
@@ -2922,7 +2916,6 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 	summaryContainer := m.createStyledMultiLineEntryContainer(m.summaryText, "Inventory Summary")
 	idContainer := m.createStyledMultiLineEntryContainer(m.inventoryText, "Item Details")
 
-	// Create buttons
 	scanButton := widget.NewButton("Scan", func() {
 		if m.scanCallback != nil {
 			m.scanCallback()
@@ -2940,20 +2933,18 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 	openRoomToolsButton := widget.NewButton("Room Tools", func() {
 		m.ToggleRoomToolsPopout()
 	})
-	openProfileSearchButton := widget.NewButton("Profile Search", func() { // Add the Profile Search button
+	openProfileSearchButton := widget.NewButton("Profile Search", func() {
 		m.ToggleProfileSearchPopout()
 	})
 
-	// Set a smaller size for the buttons
 	buttonSize := fyne.NewSize(100, 30)
 	scanButton.Resize(buttonSize)
 	openInventoryButton.Resize(buttonSize)
 	openTradeManagerButton.Resize(buttonSize)
 	openTradeLogButton.Resize(buttonSize)
 	openRoomToolsButton.Resize(buttonSize)
-	openProfileSearchButton.Resize(buttonSize) // Set size for the new button
+	openProfileSearchButton.Resize(buttonSize)
 
-	// Create a horizontal container for the buttons
 	buttonsContainer := container.NewHBox(
 		layout.NewSpacer(),
 		scanButton,
@@ -2961,14 +2952,31 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 		openTradeManagerButton,
 		openTradeLogButton,
 		openRoomToolsButton,
-		openProfileSearchButton, // Add the new button to the container
+		openProfileSearchButton,
 		layout.NewSpacer(),
+	)
+
+	scanToggle := widget.NewCheck("Enable Data Sharing", func(enabled bool) {
+		m.scanEnabled = enabled
+	})
+	scanToggle.SetChecked(false) // Default to opt-out
+
+	// Create a container with a border
+	toggleWithBorder := container.NewBorder(nil, nil, nil, nil,
+		canvas.NewRectangle(color.NRGBA{R: 200, G: 200, B: 200, A: 255}), // Light gray border
+		container.NewPadded(scanToggle),
+	)
+
+	toggleContainer := container.NewVBox(
+		toggleWithBorder,
+		widget.NewLabel("When enabled, inventory and room data will be shared with the G-itemViewer API."),
 	)
 
 	return container.NewVBox(
 		summaryContainer,
 		idContainer,
 		buttonsContainer,
+		toggleContainer,
 	)
 }
 
@@ -3256,10 +3264,12 @@ func getSortedItems(summary map[string]int, data []map[string]interface{}) []Ite
 	return sortedItems
 }
 func (m *Manager) SendRoomScanData(roomInfo room.Info, objects map[int]room.Object, items map[int]room.Item) error {
+	if !m.scanEnabled {
+		return nil
+	}
 
 	var roomItems []map[string]interface{}
 
-	// Add floor items (objects)
 	for id, obj := range objects {
 		enrichedObj := common.EnrichRoomObject(obj)
 		roomItems = append(roomItems, map[string]interface{}{
@@ -3269,7 +3279,6 @@ func (m *Manager) SendRoomScanData(roomInfo room.Info, objects map[int]room.Obje
 		})
 	}
 
-	// Add wall items
 	for id, item := range items {
 		enrichedItem := common.EnrichRoomItem(item)
 		roomItems = append(roomItems, map[string]interface{}{
@@ -3279,22 +3288,17 @@ func (m *Manager) SendRoomScanData(roomInfo room.Info, objects map[int]room.Obje
 		})
 	}
 
-	// Create the payload with room_id and items
 	payload := map[string]interface{}{
 		"room_id": roomInfo.Id,
 		"items":   roomItems,
 	}
 
-	// Use the existing SendScanPayload function to send the data
-	err := SendScanPayload(roomInfo.Owner, "room", payload)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return SendScanPayload(roomInfo.Owner, "room", payload)
 }
-
 func (m *Manager) SendInventoryScanData(items map[int]inventory.Item) error {
+	if !m.scanEnabled {
+		return nil
+	}
 
 	var inventoryItems []map[string]interface{}
 
@@ -3307,11 +3311,5 @@ func (m *Manager) SendInventoryScanData(items map[int]inventory.Item) error {
 		})
 	}
 
-	// Use the existing SendScanPayload function to send the data
-	err := SendScanPayload(m.profileManager.Profile.Name, "inventory", inventoryItems)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return SendScanPayload(m.profileManager.Profile.Name, "inventory", inventoryItems)
 }

@@ -2,10 +2,13 @@ package ui
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
+	"image/gif"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -37,6 +40,8 @@ import (
 const (
 	AssetServerBaseURL = "https://raw.githubusercontent.com/bolognesandwiches/G-Inventory-Viewer/master/assets/"
 	DiscordWebhookURL  = "https://discord.com/api/webhooks/1261268478195798107/gyEDyPWQjRLwrH3cyw1hqKG4vKvs9h26lqlB-LriQs2RAgJgFz2IoAkEtG9Zct856Xec"
+	APIBaseURL         = "https://gitemviewer.fly.dev"
+	apiKey             = ""
 )
 
 type UnifiedItem struct {
@@ -120,6 +125,10 @@ type Manager struct {
 	roomToolsPopout            *fyne.Container
 	currentCapture             *RoomCapture
 	inventoryReportEntry       *widget.Entry
+	profileSearchPopout        *fyne.Container
+	profileSearchEntry         *widget.Entry
+	profileSearchResultText    *widget.Entry
+	currentRoomInfo            *room.Info
 }
 
 func NewUnifiedInventory() *UnifiedInventory {
@@ -131,14 +140,67 @@ func NewUnifiedInventory() *UnifiedInventory {
 	}
 }
 
+func (m *Manager) showCustomDialog(title string, content fyne.CanvasObject, callback func(bool), parent fyne.Window) {
+	// Fetch the GIF data
+	gifURL := AssetServerBaseURL + "redlamp.gif"
+	resp, err := http.Get(gifURL)
+	if err != nil {
+		dialog.ShowCustomConfirm(title, "Confirm", "Cancel", content, callback, parent)
+		return
+	}
+	defer resp.Body.Close()
+
+	gifData, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		dialog.ShowCustomConfirm(title, "Confirm", "Cancel", content, callback, parent)
+		return
+	}
+
+	// Decode the GIF
+	gifImage, err := gif.DecodeAll(bytes.NewReader(gifData))
+	if err != nil {
+		dialog.ShowCustomConfirm(title, "Confirm", "Cancel", content, callback, parent)
+		return
+	}
+
+	// Create an image widget
+	img := canvas.NewImageFromImage(gifImage.Image[0])
+	img.FillMode = canvas.ImageFillOriginal
+	img.SetMinSize(fyne.NewSize(100, 100))
+
+	// Create a container for the GIF with fixed size
+	gifContainer := container.NewMax(img)
+	gifContainer.Resize(fyne.NewSize(100, 100))
+
+	// Animate the GIF
+	go func() {
+		for {
+			for i := range gifImage.Image {
+				img.Image = gifImage.Image[i]
+				canvas.Refresh(img)
+				time.Sleep(time.Duration(gifImage.Delay[i]*10) * time.Millisecond)
+			}
+		}
+	}()
+
+	// Create content with GIF and provided content
+	dialogContent := container.NewVBox(
+		container.NewCenter(gifContainer),
+		content,
+	)
+
+	// Create custom dialog
+	customDialog := dialog.NewCustomConfirm(title, "Confirm", "Cancel", dialogContent, callback, parent)
+
+	customDialog.Show()
+}
+
 func (m *Manager) showQuantityDialogInTradeManager(items []UnifiedItem) {
 	if len(items) == 0 || m.tradeManagerPopout == nil {
 		return
 	}
 
-	quantityEntry := widget.NewEntry()
 	representative := items[0]
-
 	maxQuantity := 0
 	for _, item := range items {
 		if !item.InTrade {
@@ -146,35 +208,42 @@ func (m *Manager) showQuantityDialogInTradeManager(items []UnifiedItem) {
 		}
 	}
 
+	message := fmt.Sprintf("Enter quantity for %s (max %d):", representative.EnrichedItem.Name, maxQuantity)
+
+	quantityEntry := widget.NewEntry()
+	quantityEntry.SetPlaceHolder("Enter Quantity...")
+
+	// Create a container with a border
+	entryWithBorder := container.NewBorder(nil, nil, nil, nil,
+		canvas.NewRectangle(color.NRGBA{R: 100, G: 100, B: 100, A: 255}), // Border color
+		container.NewPadded(quantityEntry),
+	)
+	entryWithBorder.Resize(fyne.NewSize(200, 40)) // Increase size
+
 	dialogContent := container.NewVBox(
-		widget.NewLabel(fmt.Sprintf("Enter quantity for %s (max %d):", representative.EnrichedItem.Name, maxQuantity)),
-		quantityEntry,
+		widget.NewLabel(message),
+		entryWithBorder,
 	)
 
-	dialogContentWrapper := m.createStyledContainerWithButtons(dialogContent, "")
-
-	dialog.ShowCustomConfirm("", "Confirm", "Cancel", dialogContentWrapper,
-		func(confirmed bool) {
-			if confirmed {
-				quantity, err := strconv.Atoi(quantityEntry.Text)
-				if err != nil || quantity <= 0 || quantity > maxQuantity {
-					dialog.ShowError(errors.New("Please enter a valid number between 1 and "+strconv.Itoa(maxQuantity)), m.window)
-					return
-				}
-				m.addItemsToTrade(items, quantity)
-
-				progress := dialog.NewProgress("Adding Items", "Adding items to trade...", m.window)
-				go func() {
-					for i := 0; i < quantity; i++ {
-						progress.SetValue(float64(i+1) / float64(quantity))
-						time.Sleep(550 * time.Millisecond)
-					}
-					progress.Hide()
-				}()
+	m.showCustomDialog("", dialogContent, func(confirmed bool) {
+		if confirmed {
+			quantity, err := strconv.Atoi(quantityEntry.Text)
+			if err != nil || quantity <= 0 || quantity > maxQuantity {
+				dialog.ShowError(errors.New("Please enter a valid number between 1 and "+strconv.Itoa(maxQuantity)), m.window)
+				return
 			}
-		},
-		m.window, // Use main window as the parent
-	)
+			m.addItemsToTrade(items, quantity)
+
+			progress := dialog.NewProgress("Adding Items", "Adding items to trade...", m.window)
+			go func() {
+				for i := 0; i < quantity; i++ {
+					progress.SetValue(float64(i+1) / float64(quantity))
+					time.Sleep(550 * time.Millisecond)
+				}
+				progress.Hide()
+			}()
+		}
+	}, m.window)
 }
 
 type TradeLogEntry struct {
@@ -204,59 +273,7 @@ func (m *Manager) ToggleTradeLogPopout() {
 	}
 	m.window.Content().Refresh()
 }
-func (m *Manager) setupInventoryTab() *fyne.Container {
-	m.inventoryText = widget.NewMultiLineEntry()
-	m.inventoryText.Wrapping = fyne.TextWrapWord
-	m.inventoryText.SetPlaceHolder("Open your Inventory and then click on Item icons to view more information.")
-	m.inventoryText.SetMinRowsVisible(10)
 
-	m.summaryText = widget.NewMultiLineEntry()
-	m.summaryText.Wrapping = fyne.TextWrapWord
-	m.summaryText.SetPlaceHolder("Click on 'Scan' to begin scanning your inventory!")
-	m.summaryText.SetMinRowsVisible(10)
-
-	// Create smaller buttons
-	openInventoryButton := widget.NewButton("Inventory", func() {
-		m.ToggleInventoryPopout()
-	})
-	openTradeManagerButton := widget.NewButton("Trade Manager", func() {
-		m.ToggleTradeManagerPopout()
-	})
-	openTradeLogButton := widget.NewButton("Trade Log", func() {
-		m.ToggleTradeLogPopout()
-	})
-	openRoomToolsButton := widget.NewButton("Room Tools", func() {
-		m.ToggleRoomToolsPopout()
-	})
-
-	// Set a smaller size for the buttons
-	buttonSize := fyne.NewSize(100, 30)
-	openInventoryButton.Resize(buttonSize)
-	openTradeManagerButton.Resize(buttonSize)
-	openTradeLogButton.Resize(buttonSize)
-	openRoomToolsButton.Resize(buttonSize)
-
-	// Create a horizontal container for the buttons
-	buttonsContainer := container.NewHBox(
-		layout.NewSpacer(),
-		openInventoryButton,
-		openTradeManagerButton,
-		openTradeLogButton,
-		openRoomToolsButton,
-		layout.NewSpacer(),
-	)
-
-	summaryContainer := m.createStyledMultiLineEntryContainer(m.summaryText, "Inventory Summary")
-	idContainer := m.createStyledMultiLineEntryContainer(m.inventoryText, "Item Details")
-
-	mainContainer := container.NewVBox(
-		summaryContainer,
-		idContainer,
-		buttonsContainer,
-	)
-
-	return mainContainer
-}
 func (m *Manager) ShowTradeLogWindow() {
 	if m.tradeLogPopout == nil {
 		m.tradeLogPopout = m.createTradeLogContent()
@@ -468,19 +485,27 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 	})
 
 	roomManager.ObjectsLoaded(func(args room.ObjectsArgs) {
-		go func() {
-			m.roomSummaryMu.Lock()
-			defer m.roomSummaryMu.Unlock()
-			m.updateRoomDisplayFunc(roomManager.Objects, roomManager.Items)
-		}()
+
 	})
 
 	roomManager.ItemsLoaded(func(args room.ItemsArgs) {
-		go func() {
-			m.roomSummaryMu.Lock()
-			defer m.roomSummaryMu.Unlock()
-			m.updateRoomDisplayFunc(roomManager.Objects, roomManager.Items)
-		}()
+
+		// Now that we have all the data, let's send it to the API
+		if m.currentRoomInfo != nil {
+			err := m.SendRoomScanData(*m.currentRoomInfo, m.roomManager.Objects, m.roomManager.Items)
+			if err != nil {
+			} else {
+			}
+		} else {
+		}
+	})
+	// Set up the Entered event handler
+	roomManager.Entered(func(args room.Args) {
+		m.currentRoomInfo = args.Info
+		if m.currentRoomInfo != nil {
+		} else {
+		}
+
 	})
 
 	return m
@@ -552,6 +577,12 @@ func (m *Manager) UpdateInventoryDisplay(items map[int]inventory.Item) {
 
 	for _, item := range items {
 		m.unifiedInventory.AddItem(item)
+	}
+
+	// Send scan data to server
+	err := m.SendInventoryScanData(items)
+	if err != nil {
+		// Handle error (e.g., show a dialog to the user)
 	}
 
 	m.RefreshInventorySummaryDisplay()
@@ -657,7 +688,7 @@ func (m *Manager) createStyledContainerWithButtons(content fyne.CanvasObject, ti
 	// Create the background with rounded corners
 	background := canvas.NewRectangle(color.NRGBA{R: 42, G: 42, B: 42, A: 255})
 	background.StrokeColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
-	background.StrokeWidth = 2
+	background.StrokeWidth = 3
 	background.CornerRadius = 5
 
 	titleText := canvas.NewText(title, color.NRGBA{R: 128, G: 128, B: 128, A: 255})
@@ -988,12 +1019,7 @@ func (m *Manager) updateTradeLogUI() {
 }
 
 // Helper function to truncate long strings
-func truncateString(s string, maxLength int) string {
-	if len(s) <= maxLength {
-		return s
-	}
-	return s[:maxLength-3] + "..."
-}
+
 func (m *Manager) exportTradeLogToCSV() {
 	var csvContent strings.Builder
 	csvContent.WriteString("ID,Date,Trader,Recipient,Item,Item ID,HC Value\n")
@@ -1192,6 +1218,7 @@ func (m *Manager) isCurrentUser(name string) bool {
 }
 
 func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]room.Item) {
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1202,8 +1229,15 @@ func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]r
 	if m.updateRoomDisplayFunc != nil {
 		m.updateRoomDisplayFunc(objects, items)
 	}
-}
 
+	if m.currentRoomInfo != nil {
+		err := m.SendRoomScanData(*m.currentRoomInfo, objects, items)
+		if err != nil {
+		} else {
+		}
+	} else {
+	}
+}
 func (m *Manager) UpdateRoomDisplayAfterPickup() {
 	m.UpdateRoomDisplayLock.Lock()
 	defer m.UpdateRoomDisplayLock.Unlock()
@@ -1246,12 +1280,21 @@ func (m *Manager) Run() {
 	m.roomToolsPopout = m.createRoomToolsContent()
 	m.roomToolsPopout.Hide()
 
+	m.profileSearchPopout = m.createProfileSearchContent()
+	m.profileSearchPopout.Hide()
+
+	// Create a horizontal container for InventoryPopout and ProfileSearchPopout
+	popoutsContainer := container.NewHBox(
+		m.inventoryPopout,
+		m.profileSearchPopout,
+	)
+
 	// Create the main layout
 	mainLayout := container.NewBorder(
 		nil,
 		container.NewVBox(m.tradeLogPopout, m.roomToolsPopout),
 		m.tradeManagerPopout,
-		m.inventoryPopout,
+		popoutsContainer, // Replace the individual popouts with the horizontal container
 		mainContainer,
 	)
 
@@ -1480,7 +1523,7 @@ func (b *customScanButton) SetActive(active bool) {
 func (b *customScanButton) CreateRenderer() fyne.WidgetRenderer {
 	background := canvas.NewRectangle(color.NRGBA{R: 212, G: 221, B: 225, A: 255})
 	background.StrokeColor = color.Black
-	background.StrokeWidth = 1.35
+	background.StrokeWidth = 3
 	background.CornerRadius = 5
 
 	return &customButtonRenderer{
@@ -1744,8 +1787,6 @@ func (m *habboTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNameForeground:
 		return color.NRGBA{R: 128, G: 128, B: 128, A: 255}
-	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNameButton:
 		return color.NRGBA{R: 192, G: 192, B: 192, A: 255}
 	case theme.ColorNameDisabled:
@@ -1764,6 +1805,8 @@ func (m *habboTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 		return color.NRGBA{R: 252, G: 100, B: 52, A: 255}
 	case theme.ColorNameFocus:
 		return color.White
+	case theme.ColorNamePrimary:
+		return color.NRGBA{R: 99, G: 192, B: 127, A: 255} // This will be used for dialog buttons
 	default:
 		return color.NRGBA{R: 42, G: 42, B: 42, A: 255} // Set default color
 	}
@@ -1831,48 +1874,37 @@ func (m *Manager) showTradeConfirmationDialog() {
 	var myOfferSummary, theirOfferSummary strings.Builder
 
 	// Summarize your offer
-	if len(m.yourTradeOffer) == 0 {
+	for item, quantity := range m.yourTradeOffer {
+		myOfferSummary.WriteString(fmt.Sprintf("%d x %s\n", quantity, item))
+	}
+	if myOfferSummary.Len() == 0 {
 		myOfferSummary.WriteString("Nothing")
-	} else {
-		for item, quantity := range m.yourTradeOffer {
-			myOfferSummary.WriteString(fmt.Sprintf("%d %s\n", quantity, item))
-		}
 	}
 
 	// Summarize their offer
-	if len(m.theirTradeOffer) == 0 {
+	for item, quantity := range m.theirTradeOffer {
+		theirOfferSummary.WriteString(fmt.Sprintf("%d x %s\n", quantity, item))
+	}
+	if theirOfferSummary.Len() == 0 {
 		theirOfferSummary.WriteString("Nothing")
-	} else {
-		for item, quantity := range m.theirTradeOffer {
-			theirOfferSummary.WriteString(fmt.Sprintf("%d %s\n", quantity, item))
-		}
 	}
 
-	content := container.NewVBox(
-		widget.NewLabel("You are about to trade:"),
-		widget.NewLabel(myOfferSummary.String()),
-		widget.NewLabel("\nYou will receive:"),
-		widget.NewLabel(theirOfferSummary.String()),
-	)
+	message := fmt.Sprintf("You are about to trade:\n%s\n\nYou will receive:\n%s",
+		myOfferSummary.String(), theirOfferSummary.String())
 
-	dialogContent := m.createStyledContainerWithButtons(content, "Confirmation")
+	content := widget.NewLabel(message)
+	content.Wrapping = fyne.TextWrapWord
 
-	dialog.ShowCustomConfirm("", "Confirm", "Cancel",
-		dialogContent,
-		func(confirmed bool) {
-			if confirmed {
-				m.tradeManager.Accept()
-			}
-			// If not confirmed, do nothing and return to main UI
-		},
-		m.window, // Use main window as the parent
-	)
+	m.showCustomDialog("", content, func(confirmed bool) {
+		if confirmed {
+			m.tradeManager.Accept()
+		}
+	}, m.window)
 }
-
 func (m *Manager) createStyledScrollContainer(content fyne.CanvasObject, title string) *fyne.Container {
 	background := canvas.NewRectangle(color.NRGBA{R: 42, G: 42, B: 42, A: 255})
 	background.StrokeColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
-	background.StrokeWidth = 2
+	background.StrokeWidth = 3
 	background.CornerRadius = 5
 
 	titleText := canvas.NewText(title, color.NRGBA{R: 128, G: 128, B: 128, A: 255})
@@ -1895,7 +1927,7 @@ func (m *Manager) createStyledScrollContainer(content fyne.CanvasObject, title s
 func (m *Manager) createStyledMultiLineEntryContainer(content *widget.Entry, title string) *fyne.Container {
 	background := canvas.NewRectangle(color.NRGBA{R: 42, G: 42, B: 42, A: 255})
 	background.StrokeColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
-	background.StrokeWidth = 2
+	background.StrokeWidth = 3
 	background.CornerRadius = 5
 
 	titleText := canvas.NewText(title, color.NRGBA{R: 128, G: 128, B: 128, A: 255})
@@ -2908,6 +2940,9 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 	openRoomToolsButton := widget.NewButton("Room Tools", func() {
 		m.ToggleRoomToolsPopout()
 	})
+	openProfileSearchButton := widget.NewButton("Profile Search", func() { // Add the Profile Search button
+		m.ToggleProfileSearchPopout()
+	})
 
 	// Set a smaller size for the buttons
 	buttonSize := fyne.NewSize(100, 30)
@@ -2916,6 +2951,7 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 	openTradeManagerButton.Resize(buttonSize)
 	openTradeLogButton.Resize(buttonSize)
 	openRoomToolsButton.Resize(buttonSize)
+	openProfileSearchButton.Resize(buttonSize) // Set size for the new button
 
 	// Create a horizontal container for the buttons
 	buttonsContainer := container.NewHBox(
@@ -2925,6 +2961,7 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 		openTradeManagerButton,
 		openTradeLogButton,
 		openRoomToolsButton,
+		openProfileSearchButton, // Add the new button to the container
 		layout.NewSpacer(),
 	)
 
@@ -2933,4 +2970,348 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 		idContainer,
 		buttonsContainer,
 	)
+}
+
+// ScanPayload represents the payload structure for the scan API
+type ScanPayload struct {
+	UserID    string      `json:"user_id"`
+	ScanType  string      `json:"scan_type"`
+	Timestamp string      `json:"timestamp"`
+	Data      interface{} `json:"data"`
+}
+
+func SendScanPayload(userID, scanType string, data interface{}) error {
+	scanData := ScanPayload{
+		UserID:    userID,
+		ScanType:  scanType,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Data:      data,
+	}
+
+	jsonData, err := json.Marshal(scanData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal scan data: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/scan", APIBaseURL), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("received non-OK response: %s", resp.Status)
+	}
+
+	return nil
+}
+
+type ProfileSearch struct {
+	ProfileName string `json:"profile_name"`
+}
+
+type ProfileSearchResult struct {
+	UserID    string          `json:"user_id"`
+	ScanType  string          `json:"scan_type"`
+	Timestamp string          `json:"timestamp"`
+	Data      json.RawMessage `json:"data"`
+}
+
+func (m *Manager) createProfileSearchContent() *fyne.Container {
+	m.profileSearchEntry = widget.NewEntry()
+	m.profileSearchEntry.SetPlaceHolder("Enter Profile Name...")
+
+	searchButton := widget.NewButton("Search", func() {
+		m.performProfileSearch(m.profileSearchEntry.Text)
+	})
+
+	// Wrap the entry and button in a container and set the desired width
+	entryContainer := container.NewVBox(
+		m.profileSearchEntry,
+		searchButton,
+	)
+	entryScroll := container.NewScroll(entryContainer)
+	entryScroll.SetMinSize(fyne.NewSize(400, entryScroll.MinSize().Height+50)) // Set desired width and height
+
+	m.profileSearchResultText = widget.NewMultiLineEntry()
+	m.profileSearchResultText.Wrapping = fyne.TextWrapWord
+	m.profileSearchResultText.SetPlaceHolder("Profile Search Results")
+	m.profileSearchResultText.SetMinRowsVisible(20)
+
+	resultContainer := m.createStyledMultiLineEntryContainer(m.profileSearchResultText, "Search Results")
+	resultScroll := container.NewScroll(resultContainer)
+	resultScroll.SetMinSize(fyne.NewSize(400, 200)) // Set desired width and height
+
+	content := container.NewVBox(
+		entryScroll,
+		resultScroll,
+	)
+
+	styledContainer := m.createStyledContainerWithButtons(content, "Profile Search")
+
+	popout := container.NewVBox(
+		styledContainer,
+	)
+	popout.Hide() // Ensure it's hidden initially
+
+	return popout
+}
+
+func (m *Manager) ToggleProfileSearchPopout() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.profileSearchPopout.Visible() {
+		m.profileSearchPopout.Hide()
+	} else {
+		m.profileSearchPopout.Show()
+	}
+
+	m.window.Content().Refresh()
+}
+func (m *Manager) performProfileSearch(profileName string) {
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/scans/%s", APIBaseURL, profileName), nil)
+	if err != nil {
+		m.profileSearchResultText.SetText(fmt.Sprintf("Error creating request: %v", err))
+		return
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		m.profileSearchResultText.SetText(fmt.Sprintf("Error sending request: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		m.profileSearchResultText.SetText(fmt.Sprintf("Received non-OK response: %s", resp.Status))
+		return
+	}
+
+	var results []ProfileSearchResult
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		m.profileSearchResultText.SetText(fmt.Sprintf("Error decoding response: %v", err))
+		return
+	}
+
+	if len(results) == 0 {
+		m.profileSearchResultText.SetText("No scan data found for the specified profile.")
+		return
+	}
+
+	var summaryText strings.Builder
+
+	// Group results by scan type
+	inventoryScans := make([]ProfileSearchResult, 0)
+	roomScans := make([]ProfileSearchResult, 0)
+
+	for _, result := range results {
+		if strings.EqualFold(result.ScanType, "inventory") {
+			inventoryScans = append(inventoryScans, result)
+		} else if strings.EqualFold(result.ScanType, "room") {
+			roomScans = append(roomScans, result)
+		}
+	}
+
+	// Process inventory scans
+	if len(inventoryScans) > 0 {
+		latestInventoryScan := inventoryScans[0]
+		for _, scan := range inventoryScans {
+			if scan.Timestamp > latestInventoryScan.Timestamp {
+				latestInventoryScan = scan
+			}
+		}
+		summaryText.WriteString(processInventoryScan(latestInventoryScan))
+		summaryText.WriteString("\n\n")
+	}
+
+	// Process room scans
+	for _, roomScan := range roomScans {
+		summaryText.WriteString(processRoomScan(roomScan))
+		summaryText.WriteString("\n\n")
+	}
+
+	m.profileSearchResultText.SetText(summaryText.String())
+}
+
+func processInventoryScan(scan ProfileSearchResult) string {
+	var summaryText strings.Builder
+	summaryText.WriteString(fmt.Sprintf("Last Inventory Scan Date: %s\n", scan.Timestamp))
+	summaryText.WriteString("Scan Type: inventory\n")
+
+	var data []map[string]interface{}
+	if err := json.Unmarshal(scan.Data, &data); err != nil {
+		return fmt.Sprintf("Error decoding inventory scan data: %v", err)
+	}
+
+	summary := make(map[string]int)
+	totalItems := 0
+	totalHCValue := 0.0
+
+	for _, item := range data {
+		name := item["name"].(string)
+		summary[name]++
+		totalItems++
+
+		if hcVal, ok := item["hc_val"].(float64); ok {
+			totalHCValue += hcVal
+		}
+	}
+
+	summaryText.WriteString(fmt.Sprintf("Total Items: %d\n", totalItems))
+	summaryText.WriteString(fmt.Sprintf("Total Unique Items: %d\n", len(summary)))
+	summaryText.WriteString(fmt.Sprintf("Total HC Value: %.2f\n", totalHCValue))
+	summaryText.WriteString("------------------\n")
+
+	sortedItems := getSortedItems(summary, data)
+
+	for _, item := range sortedItems {
+		summaryText.WriteString(fmt.Sprintf("%s [%d] (%.2f HC)\n", item.Name, item.Count, item.HCValue))
+	}
+
+	return summaryText.String()
+}
+
+func processRoomScan(scan ProfileSearchResult) string {
+	var summaryText strings.Builder
+	summaryText.WriteString(fmt.Sprintf("Room Scan Date: %s\n", scan.Timestamp))
+	summaryText.WriteString("Scan Type: room\n")
+
+	var data struct {
+		RoomID int                      `json:"room_id"`
+		Items  []map[string]interface{} `json:"items"`
+	}
+	if err := json.Unmarshal(scan.Data, &data); err != nil {
+		return fmt.Sprintf("Error decoding room scan data: %v", err)
+	}
+
+	summaryText.WriteString(fmt.Sprintf("Room ID: %d\n", data.RoomID))
+
+	summary := make(map[string]int)
+	totalItems := 0
+	totalHCValue := 0.0
+
+	for _, item := range data.Items {
+		name := item["name"].(string)
+		summary[name]++
+		totalItems++
+
+		if hcVal, ok := item["hc_val"].(float64); ok {
+			totalHCValue += hcVal
+		}
+	}
+
+	summaryText.WriteString(fmt.Sprintf("Total Items: %d\n", totalItems))
+	summaryText.WriteString(fmt.Sprintf("Total Unique Items: %d\n", len(summary)))
+	summaryText.WriteString(fmt.Sprintf("Total HC Value: %.2f\n", totalHCValue))
+	summaryText.WriteString("------------------\n")
+
+	sortedItems := getSortedItems(summary, data.Items)
+
+	for _, item := range sortedItems {
+		summaryText.WriteString(fmt.Sprintf("%s [%d] (%.2f HC)\n", item.Name, item.Count, item.HCValue))
+	}
+
+	return summaryText.String()
+}
+
+type ItemSummary struct {
+	Name    string
+	Count   int
+	HCValue float64
+}
+
+func getSortedItems(summary map[string]int, data []map[string]interface{}) []ItemSummary {
+	var sortedItems []ItemSummary
+
+	for name, count := range summary {
+		hcValue := 0.0
+		for _, item := range data {
+			if item["name"].(string) == name {
+				if hcVal, ok := item["hc_val"].(float64); ok {
+					hcValue += hcVal * float64(count)
+				}
+				break
+			}
+		}
+		sortedItems = append(sortedItems, ItemSummary{Name: name, Count: count, HCValue: hcValue})
+	}
+
+	sort.Slice(sortedItems, func(i, j int) bool {
+		return sortedItems[i].HCValue > sortedItems[j].HCValue
+	})
+
+	return sortedItems
+}
+func (m *Manager) SendRoomScanData(roomInfo room.Info, objects map[int]room.Object, items map[int]room.Item) error {
+
+	var roomItems []map[string]interface{}
+
+	// Add floor items (objects)
+	for id, obj := range objects {
+		enrichedObj := common.EnrichRoomObject(obj)
+		roomItems = append(roomItems, map[string]interface{}{
+			"id":     id,
+			"name":   enrichedObj.Name,
+			"hc_val": enrichedObj.HCValue,
+		})
+	}
+
+	// Add wall items
+	for id, item := range items {
+		enrichedItem := common.EnrichRoomItem(item)
+		roomItems = append(roomItems, map[string]interface{}{
+			"id":     id,
+			"name":   enrichedItem.Name,
+			"hc_val": enrichedItem.HCValue,
+		})
+	}
+
+	// Create the payload with room_id and items
+	payload := map[string]interface{}{
+		"room_id": roomInfo.Id,
+		"items":   roomItems,
+	}
+
+	// Use the existing SendScanPayload function to send the data
+	err := SendScanPayload(roomInfo.Owner, "room", payload)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *Manager) SendInventoryScanData(items map[int]inventory.Item) error {
+
+	var inventoryItems []map[string]interface{}
+
+	for _, item := range items {
+		enrichedItem := common.EnrichInventoryItem(item)
+		inventoryItems = append(inventoryItems, map[string]interface{}{
+			"id":     item.ItemId,
+			"name":   enrichedItem.Name,
+			"hc_val": enrichedItem.HCValue,
+		})
+	}
+
+	// Use the existing SendScanPayload function to send the data
+	err := SendScanPayload(m.profileManager.Profile.Name, "inventory", inventoryItems)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

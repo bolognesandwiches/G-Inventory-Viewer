@@ -125,6 +125,13 @@ func GetHCValue(itemName string) float64 {
 		itemName = mappedName
 	}
 
+	// Special cases for Imperial Teleports and Green Teleport
+	if itemName == "Imperial Teleports" || itemName == "Green Teleport" {
+		if item, ok := apiItems[itemName]; ok {
+			return item.HCVal / 2
+		}
+	}
+
 	if item, ok := apiItems[itemName]; ok {
 		return item.HCVal
 	}

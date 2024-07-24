@@ -2,6 +2,9 @@
 
 G-itemViewer is a specialized tool for Habbo Origins, offering comprehensive inventory management, room item viewing and trading assistance.
 
+## **NOTE: Item and Room scan data is automatically uploaded to an external, publicly accessible G-itemviewer owned API. You can view your raw scan data by visitng https://gitemviewer.fly.dev/scans/USERNAME.**
+
+
 ## Features and How to Use
 
 ### 1. Inventory Management
@@ -52,7 +55,6 @@ G-itemViewer is a specialized tool for Habbo Origins, offering comprehensive inv
 ## Additional Notes
 - The application automatically updates inventory and room data as changes occur in-game.
 - HC values are fetched from an external source for accuracy (TraderClub.gg API)
-- Item and Room scan data is automatically uploaded to an external, G-itemviewer owned API (https://gitemviewer.fly.dev/scans/USERPROFILE)
 - All operations are designed to be fast and efficient, with real-time updates.
 
 Enjoy an enhanced Habbo experience with G-itemViewer!

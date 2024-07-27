@@ -476,32 +476,39 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 
 	m.roomSummary = NewRoomSummary()
 
-	roomManager.ObjectAdded(func(args room.ObjectArgs) {
+	m.roomManager.ObjectAdded(func(args room.ObjectArgs) {
+		m.roomMutex.Lock()
+		defer m.roomMutex.Unlock()
 		m.AddItemToRoom(args.Object)
 		m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 	})
 
-	roomManager.ObjectRemoved(func(args room.ObjectArgs) {
+	m.roomManager.ObjectRemoved(func(args room.ObjectArgs) {
+		m.roomMutex.Lock()
+		defer m.roomMutex.Unlock()
 		m.RemoveItemFromRoom(args.Object.Id)
 		m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 	})
 
-	roomManager.ObjectsLoaded(func(args room.ObjectsArgs) {
+	m.roomManager.ObjectsLoaded(func(args room.ObjectsArgs) {
+		m.roomMutex.Lock()
+		defer m.roomMutex.Unlock()
 		m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 	})
 
-	roomManager.ItemsLoaded(func(args room.ItemsArgs) {
+	m.roomManager.ItemsLoaded(func(args room.ItemsArgs) {
+		m.roomMutex.Lock()
+		defer m.roomMutex.Unlock()
 		m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 
 		if m.currentRoomInfo != nil {
-			err := m.SendRoomScanData(*m.currentRoomInfo, m.roomManager.Objects, m.roomManager.Items)
-			if err != nil {
-				// Handle error (e.g., log it)
-			}
+			go m.SendRoomScanData(*m.currentRoomInfo, m.roomManager.Objects, m.roomManager.Items)
 		}
 	})
 
 	roomManager.Entered(func(args room.Args) {
+		m.roomMutex.Lock()
+		defer m.roomMutex.Unlock()
 		m.currentRoomInfo = args.Info
 		if m.currentRoomInfo != nil {
 			// Log or handle the room entry
@@ -512,16 +519,20 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 }
 func (m *Manager) AddItemToRoom(item room.Object) {
 	m.roomSummary.mu.Lock()
-	defer m.roomSummary.mu.Unlock()
 	m.roomSummary.Items[item.Id] = item
-	m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
+	m.roomSummary.mu.Unlock()
+
+	// Update room display asynchronously
+	go m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 }
 
 func (m *Manager) RemoveItemFromRoom(itemId int) {
 	m.roomSummary.mu.Lock()
-	defer m.roomSummary.mu.Unlock()
 	delete(m.roomSummary.Items, itemId)
-	m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
+	m.roomSummary.mu.Unlock()
+
+	// Update room display asynchronously
+	go m.UpdateRoomDisplay(m.roomManager.Objects, m.roomManager.Items)
 }
 
 func (m *Manager) UpdateRoomSummaryDisplay() {
@@ -1218,18 +1229,15 @@ func (m *Manager) isCurrentUser(name string) bool {
 }
 
 func (m *Manager) UpdateRoomDisplay(objects map[int]room.Object, items map[int]room.Item) {
-	m.UpdateRoomDisplayLock.Lock()
-	defer m.UpdateRoomDisplayLock.Unlock()
-
 	m.roomSummary.mu.Lock()
+	defer m.roomSummary.mu.Unlock()
+
 	m.roomSummary.Items = objects
-	m.roomSummary.mu.Unlock()
 
 	if m.updateRoomDisplayFunc != nil {
-		m.updateRoomDisplayFunc(objects, items)
+		// Consider running this in a goroutine if it's a long-running operation
+		go m.updateRoomDisplayFunc(objects, items)
 	}
-
-	// Don't send room scan data here, as it might be called too frequently
 }
 func (m *Manager) UpdateRoomDisplayAfterPickup() {
 	m.UpdateRoomDisplayLock.Lock()
@@ -2037,6 +2045,9 @@ func (m *Manager) writeItemValidation(report *strings.Builder, itemName string, 
 }
 
 func (m *Manager) getInventoryItemCount(itemName string, isWallItem bool) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	count := 0
 	for _, item := range m.unifiedInventory.Items {
 		enrichedItem := common.EnrichInventoryItem(item.Item)
@@ -2117,6 +2128,9 @@ func (m *Manager) getTotalItemCount(capture *RoomCapture) int {
 }
 
 func (m *Manager) placeItem(itemName string, isWallItem bool, info interface{}) bool {
+
+	m.roomMutex.Lock()
+	defer m.roomMutex.Unlock()
 	var itemToPlace *inventory.Item
 	var itemId int
 	for id, unifiedItem := range m.unifiedInventory.Items {
@@ -2159,6 +2173,10 @@ func (m *Manager) placeItem(itemName string, isWallItem bool, info interface{}) 
 }
 
 func (m *Manager) PickupItems(itemIds []int, onComplete func()) {
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	for _, id := range itemIds {
 		var packetData string
 		var itemToAdd inventory.Item
@@ -3268,6 +3286,9 @@ func (m *Manager) SendRoomScanData(roomInfo room.Info, objects map[int]room.Obje
 		return nil
 	}
 
+	m.roomMutex.RLock()
+	defer m.roomMutex.RUnlock()
+
 	var roomItems []map[string]interface{}
 
 	for id, obj := range objects {
@@ -3293,7 +3314,12 @@ func (m *Manager) SendRoomScanData(roomInfo room.Info, objects map[int]room.Obje
 		"items":   roomItems,
 	}
 
-	return SendScanPayload(roomInfo.Owner, "room", payload)
+	// Release the lock before making the network call
+	m.roomMutex.RUnlock()
+	err := SendScanPayload(roomInfo.Owner, "room", payload)
+	m.roomMutex.RLock()
+
+	return err
 }
 func (m *Manager) SendInventoryScanData(items map[int]inventory.Item) error {
 	if !m.scanEnabled {

@@ -118,6 +118,8 @@ var specialNameMappings = map[string]string{
 	"Dicemaster":                "Dice Master",
 	"Vanilla Ice Cream Machine": "Gold icecream maker",
 	"doorE":                     "Green Teleport",
+	"Mars Smoke Machine":        "Red Smoke MAchine",
+	"chair_plasty*109":          "Funky Friday: Teal Plasto",
 }
 
 func GetHCValue(itemName string) float64 {

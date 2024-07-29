@@ -11,7 +11,9 @@ import (
 	"image/gif"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -912,6 +914,15 @@ func (m *Manager) handleTradeCompleted(args trade.Args) {
 	// If the Trade Log popout is open, update it
 	if m.tradeLogPopout.Visible() {
 		m.updateTradeLogUI()
+	}
+
+	// Send trade log to API
+	if m.scanEnabled {
+		go func() {
+			err := m.SendTradeLogToAPI(logEntry)
+			if err != nil {
+			}
+		}()
 	}
 
 	// Remove traded items from our inventory
@@ -2979,15 +2990,53 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 	})
 	scanToggle.SetChecked(false) // Default to opt-out
 
-	// Create a container with a border
-	toggleWithBorder := container.NewBorder(nil, nil, nil, nil,
-		canvas.NewRectangle(color.NRGBA{R: 200, G: 200, B: 200, A: 255}), // Light gray border
-		container.NewPadded(scanToggle),
+	deletionRequestButton := widget.NewButton("Request Data Deletion", func() {
+		m.showDeletionRequestForm()
+	})
+
+	// Load and create the TC_Badge
+	tcBadge, err := m.loadImage("TC_Badge.png")
+	if err != nil {
+	}
+
+	var tcBadgeButton *widget.Button
+	if tcBadge != nil {
+		tcBadgeButton = widget.NewButton("", func() {
+			url, _ := url.Parse("https://www.traderclub.gg")
+			err := fyne.CurrentApp().OpenURL(url)
+			if err != nil {
+			}
+		})
+		tcBadgeButton.SetIcon(tcBadge)
+		tcBadgeButton.Importance = widget.LowImportance
+		tcBadgeButton.Resize(fyne.NewSize(50, 50)) // Adjust size as needed
+	}
+
+	// Create a horizontal container for the toggle, TC badge, and deletion request button
+	toggleAndButtonContainer := container.NewHBox(
+		scanToggle,
+		layout.NewSpacer(), // This pushes the TC badge to the center
+		tcBadgeButton,
+		layout.NewSpacer(), // This pushes the deletion request button to the right
+		deletionRequestButton,
 	)
 
+	// Create a background for the container
+	background := canvas.NewRectangle(color.NRGBA{R: 60, G: 60, B: 60, A: 255})
+
+	// Combine the background and content
+	contentWithBackground := container.NewMax(
+		background,
+		container.NewPadded(toggleAndButtonContainer),
+	)
+
+	// Add a label below the container
+	infoLabel := widget.NewLabel("When enabled, inventory and room data will be shared with the G-itemViewer API.")
+	infoLabel.Alignment = fyne.TextAlignCenter
+
 	toggleContainer := container.NewVBox(
-		toggleWithBorder,
-		widget.NewLabel("When enabled, inventory and room data will be shared with the G-itemViewer API."),
+		contentWithBackground,
+		infoLabel,
 	)
 
 	return container.NewVBox(
@@ -2996,6 +3045,61 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 		buttonsContainer,
 		toggleContainer,
 	)
+}
+
+func (m *Manager) showDeletionRequestForm() {
+	reason := widget.NewMultiLineEntry()
+	reason.SetPlaceHolder("Reason for deletion request")
+
+	content := container.NewVBox(
+		widget.NewLabel("Reason:"),
+		reason,
+	)
+
+	customDialog := dialog.NewCustom("Data Deletion Request", "Cancel", content, m.window)
+
+	submitButton := widget.NewButton("Submit", func() {
+		go m.sendDeletionRequest(m.profileManager.Profile.Name, reason.Text)
+		customDialog.Hide()
+		dialog.ShowInformation("Request Submitted", "Your data deletion request has been submitted for review.", m.window)
+	})
+
+	cancelButton := widget.NewButton("Cancel", func() {
+		customDialog.Hide()
+	})
+
+	customDialog.SetButtons([]fyne.CanvasObject{cancelButton, submitButton})
+	customDialog.Show()
+}
+func (m *Manager) sendDeletionRequest(username, reason string) {
+	requestData := map[string]string{
+		"username": username,
+		"reason":   reason,
+	}
+
+	jsonData, err := json.Marshal(requestData)
+	if err != nil {
+		log.Printf("Error marshaling deletion request: %v", err)
+		return
+	}
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/deletion-request", APIBaseURL), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+	}
 }
 
 // ScanPayload represents the payload structure for the scan API
@@ -3338,4 +3442,69 @@ func (m *Manager) SendInventoryScanData(items map[int]inventory.Item) error {
 	}
 
 	return SendScanPayload(m.profileManager.Profile.Name, "inventory", inventoryItems)
+}
+
+// Add this struct definition
+type TradeItem struct {
+	UID       string    `json:"uid"`
+	Date      time.Time `json:"date"`
+	Trader    string    `json:"trader"`
+	Recipient string    `json:"recipient"`
+	ItemName  string    `json:"item_name"`
+	ItemID    int       `json:"item_id"`
+	HCValue   float64   `json:"hc_value"`
+}
+
+func (m *Manager) SendTradeLogToAPI(trade TradeLogEntry) error {
+	var tradeItems []TradeItem
+
+	// Add traded items
+	for i, itemName := range trade.ItemsTraded {
+		tradeItems = append(tradeItems, TradeItem{
+			Date:      time.Now(),
+			Trader:    trade.Trader,
+			Recipient: trade.Tradee,
+			ItemName:  itemName,
+			ItemID:    trade.ItemIDsTraded[i],
+			HCValue:   trade.HCValuesTraded[i],
+		})
+	}
+
+	// Add received items
+	for i, itemName := range trade.ItemsReceived {
+		tradeItems = append(tradeItems, TradeItem{
+			Date:      time.Now(),
+			Trader:    trade.Tradee,
+			Recipient: trade.Trader,
+			ItemName:  itemName,
+			ItemID:    trade.ItemIDsReceived[i],
+			HCValue:   trade.HCValuesReceived[i],
+		})
+	}
+
+	jsonData, err := json.Marshal(tradeItems)
+	if err != nil {
+		return fmt.Errorf("failed to marshal trade data: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/trade", APIBaseURL), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("received non-OK response: %s", resp.Status)
+	}
+
+	return nil
 }

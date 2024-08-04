@@ -31,6 +31,9 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/common"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/trading"
+	"github.com/faiface/beep"
+	"github.com/faiface/beep/speaker"
+	"github.com/faiface/beep/wav"
 	g "xabbo.b7c.io/goearth"
 	"xabbo.b7c.io/goearth/shockwave/inventory"
 	"xabbo.b7c.io/goearth/shockwave/out"
@@ -132,6 +135,8 @@ type Manager struct {
 	profileSearchResultText    *widget.Entry
 	currentRoomInfo            *room.Info
 	scanEnabled                bool
+	tradeCompleted             bool
+	tradeMutex                 sync.Mutex
 }
 
 func NewUnifiedInventory() *UnifiedInventory {
@@ -450,6 +455,14 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 		iconContainer:     container.NewGridWrap(fyne.NewSize(36, 36)),
 		roomSummaryMu:     sync.RWMutex{},
 		scanEnabled:       false,
+		tradeCompleted:    false,
+		tradeMutex:        sync.Mutex{},
+	}
+
+	// Initialize speaker
+	err := speaker.Init(44100, 44100/10)
+	if err != nil {
+		log.Println("Error initializing speaker:", err)
 	}
 
 	// Register handlers for inventory changes
@@ -519,6 +532,7 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 
 	return m
 }
+
 func (m *Manager) AddItemToRoom(item room.Object) {
 	m.roomSummary.mu.Lock()
 	m.roomSummary.Items[item.Id] = item
@@ -700,11 +714,11 @@ func (m *Manager) createGroupedItemButton(items []UnifiedItem) *widget.Button {
 func (m *Manager) createStyledContainerWithButtons(content fyne.CanvasObject, title string) *fyne.Container {
 	// Create the background with rounded corners
 	background := canvas.NewRectangle(color.NRGBA{R: 42, G: 42, B: 42, A: 255})
-	background.StrokeColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
+	background.StrokeColor = color.NRGBA{R: 180, G: 180, B: 180, A: 255}
 	background.StrokeWidth = 3
 	background.CornerRadius = 5
 
-	titleText := canvas.NewText(title, color.NRGBA{R: 128, G: 128, B: 128, A: 255})
+	titleText := canvas.NewText(title, color.NRGBA{R: 180, G: 180, B: 180, A: 255})
 	titleText.Alignment = fyne.TextAlignCenter
 	titleText.TextStyle = fyne.TextStyle{Bold: true}
 
@@ -764,6 +778,7 @@ func (m *Manager) handleTradeUpdated(args trade.Args) {
 	opened := len(args.Offers[0].Items) == 0 && len(args.Offers[1].Items) == 0
 	if opened {
 		m.HandleTradeStatus(true)
+		go m.playSound("opened.wav")
 	}
 	m.updateTradeOffers(trading.Offers{
 		Trader: args.Offers[0],
@@ -840,6 +855,12 @@ func (m *Manager) ResetTradeManagerWindow() {
 }
 
 func (m *Manager) handleTradeCompleted(args trade.Args) {
+	m.tradeMutex.Lock()
+	m.tradeCompleted = true
+	m.tradeMutex.Unlock()
+
+	go m.playSound("completed.wav")
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -921,6 +942,7 @@ func (m *Manager) handleTradeCompleted(args trade.Args) {
 		go func() {
 			err := m.SendTradeLogToAPI(logEntry)
 			if err != nil {
+				// Handle error
 			}
 		}()
 	}
@@ -946,32 +968,52 @@ func (m *Manager) handleTradeCompleted(args trade.Args) {
 
 	m.tradeManagerPopout.Hide() // Hide the trade manager popout when the trade is completed
 	m.window.Content().Refresh()
+
+	// Reset the tradeCompleted flag after a delay
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		m.tradeMutex.Lock()
+		m.tradeCompleted = false
+		m.tradeMutex.Unlock()
+	}()
 }
-
 func (m *Manager) handleTradeClosed(args trade.Args) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	go func() {
+		// Wait a short time to see if the trade was completed
+		time.Sleep(100 * time.Millisecond)
 
-	// Reset trade status for all items
-	for itemId := range m.unifiedInventory.Items {
-		m.unifiedInventory.UpdateItemTradeStatus(itemId, false)
-	}
+		m.tradeMutex.Lock()
+		wasCompleted := m.tradeCompleted
+		m.tradeMutex.Unlock()
 
-	m.ResetTradeManagerContent()
+		if !wasCompleted {
+			m.playSound("closed.wav")
+		}
 
-	if m.tradeNewEntry != nil {
-		m.tradeNewEntry.SetText("Trade window closed. Awaiting Trade...")
-	}
+		m.mu.Lock()
+		defer m.mu.Unlock()
 
-	m.RefreshInventoryIcons()
-	m.RefreshTradingInventoryDisplay()
+		// Reset trade status for all items
+		for itemId := range m.unifiedInventory.Items {
+			m.unifiedInventory.UpdateItemTradeStatus(itemId, false)
+		}
 
-	if m.tradeAcceptButton != nil {
-		m.tradeAcceptButton.Enable() // Re-enable the accept trade button after trade closure
-	}
+		m.ResetTradeManagerContent()
 
-	m.tradeManagerPopout.Hide() // Hide the trade manager popout when the trade is closed
-	m.window.Content().Refresh()
+		if m.tradeNewEntry != nil {
+			m.tradeNewEntry.SetText("Trade window closed. Awaiting Trade...")
+		}
+
+		m.RefreshInventoryIcons()
+		m.RefreshTradingInventoryDisplay()
+
+		if m.tradeAcceptButton != nil {
+			m.tradeAcceptButton.Enable() // Re-enable the accept trade button after trade closure
+		}
+
+		m.tradeManagerPopout.Hide() // Hide the trade manager popout when the trade is closed
+		m.window.Content().Refresh()
+	}()
 }
 
 func (m *Manager) updateTradeLogUI() {
@@ -1712,7 +1754,7 @@ func (t *customTab) CreateRenderer() fyne.WidgetRenderer {
 	text := canvas.NewText(t.text, color.Black)
 	text.Alignment = fyne.TextAlignTrailing
 	text.TextStyle = fyne.TextStyle{Bold: true}
-	text.TextSize = 11
+	text.TextSize = 13
 
 	background := canvas.NewRectangle(color.Transparent)
 	outline := canvas.NewRectangle(color.Black)
@@ -1798,13 +1840,13 @@ func (m *habboTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 	case theme.ColorNameBackground:
 		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNameForeground:
-		return color.NRGBA{R: 128, G: 128, B: 128, A: 255}
+		return color.NRGBA{R: 180, G: 180, B: 180, A: 255} // Lighter font color
 	case theme.ColorNameButton:
-		return color.NRGBA{R: 192, G: 192, B: 192, A: 255}
+		return color.NRGBA{R: 100, G: 100, B: 100, A: 255} // Darker button color
 	case theme.ColorNameDisabled:
 		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNamePlaceHolder:
-		return color.NRGBA{R: 0x80, G: 0x80, B: 0x80, A: 0xFF}
+		return color.NRGBA{R: 140, G: 140, B: 140, A: 255} // Slightly lighter placeholder text
 	case theme.ColorNameScrollBar:
 		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	case theme.ColorNameInputBackground:
@@ -1818,9 +1860,9 @@ func (m *habboTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 	case theme.ColorNameFocus:
 		return color.White
 	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 99, G: 192, B: 127, A: 255} // This will be used for dialog buttons
+		return color.NRGBA{R: 99, G: 192, B: 127, A: 255}
 	default:
-		return color.NRGBA{R: 42, G: 42, B: 42, A: 255} // Set default color
+		return color.NRGBA{R: 42, G: 42, B: 42, A: 255}
 	}
 }
 
@@ -1838,7 +1880,7 @@ func (m *habboTheme) Font(style fyne.TextStyle) fyne.Resource {
 func (m *habboTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
 	case theme.SizeNameText:
-		return 9
+		return 13
 	case theme.SizeNamePadding:
 		return 8
 	case theme.SizeNameInlineIcon:
@@ -1919,10 +1961,10 @@ func (m *Manager) createStyledScrollContainer(content fyne.CanvasObject, title s
 	background.StrokeWidth = 3
 	background.CornerRadius = 5
 
-	titleText := canvas.NewText(title, color.NRGBA{R: 128, G: 128, B: 128, A: 255})
+	titleText := canvas.NewText(title, color.NRGBA{R: 180, G: 180, B: 180, A: 255})
 	titleText.Alignment = fyne.TextAlignCenter
 	titleText.TextStyle = fyne.TextStyle{Bold: true}
-	titleText.Color = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
+	titleText.Color = color.NRGBA{R: 180, G: 180, B: 180, A: 255}
 
 	scrollContainer := container.NewScroll(content)
 	scrollContainer.SetMinSize(fyne.NewSize(0, 150)) // Adjust the height as needed
@@ -1938,11 +1980,11 @@ func (m *Manager) createStyledScrollContainer(content fyne.CanvasObject, title s
 
 func (m *Manager) createStyledMultiLineEntryContainer(content *widget.Entry, title string) *fyne.Container {
 	background := canvas.NewRectangle(color.NRGBA{R: 42, G: 42, B: 42, A: 255})
-	background.StrokeColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
+	background.StrokeColor = color.NRGBA{R: 180, G: 180, B: 180, A: 255}
 	background.StrokeWidth = 3
 	background.CornerRadius = 5
 
-	titleText := canvas.NewText(title, color.NRGBA{R: 128, G: 128, B: 128, A: 255})
+	titleText := canvas.NewText(title, color.NRGBA{R: 180, G: 180, B: 180, A: 255})
 	titleText.Alignment = fyne.TextAlignCenter
 	titleText.TextStyle = fyne.TextStyle{Bold: true}
 
@@ -3507,4 +3549,58 @@ func (m *Manager) SendTradeLogToAPI(trade TradeLogEntry) error {
 	}
 
 	return nil
+}
+
+func (m *Manager) playSound(filename string) {
+	// Download the file
+	resp, err := http.Get(AssetServerBaseURL + filename)
+	if err != nil {
+		log.Println("Error downloading sound file:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Create a temporary file
+	tmpFile, err := ioutil.TempFile("", "sound-*.wav")
+	if err != nil {
+		log.Println("Error creating temporary file:", err)
+		return
+	}
+	defer os.Remove(tmpFile.Name()) // Clean up
+
+	// Copy the downloaded data to the temporary file
+	_, err = io.Copy(tmpFile, resp.Body)
+	if err != nil {
+		log.Println("Error writing to temporary file:", err)
+		return
+	}
+	tmpFile.Close()
+
+	// Open the temporary file for playing
+	f, err := os.Open(tmpFile.Name())
+	if err != nil {
+		log.Println("Error opening temporary sound file:", err)
+		return
+	}
+	defer f.Close()
+
+	streamer, format, err := wav.Decode(f)
+	if err != nil {
+		log.Println("Error decoding WAV file:", err)
+		return
+	}
+	defer streamer.Close()
+
+	err = speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
+	if err != nil {
+		log.Println("Error initializing speaker:", err)
+		return
+	}
+
+	done := make(chan bool)
+	speaker.Play(beep.Seq(streamer, beep.Callback(func() {
+		done <- true
+	})))
+
+	<-done
 }

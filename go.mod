@@ -2,10 +2,16 @@ module github.com/bolognesandwiches/G-Inventory-Viewer
 
 go 1.22
 
-require fyne.io/fyne/v2 v2.4.5
+require (
+	fyne.io/fyne/v2 v2.4.5
+	github.com/faiface/beep v1.1.0
+)
 
 require (
+	github.com/hajimehoshi/oto v1.0.1 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
 	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
+	golang.org/x/exp/shiny v0.0.0-20240719175910-8a7402abbf56 // indirect
 )
 
 require (
@@ -29,11 +35,11 @@ require (
 	github.com/stretchr/testify v1.8.4 // indirect
 	github.com/tevino/abool v1.2.0 // indirect
 	github.com/yuin/goldmark v1.5.5 // indirect
-	golang.org/x/image v0.11.0 // indirect
-	golang.org/x/mobile v0.0.0-20230531173138-3c911d8e3eda // indirect
+	golang.org/x/image v0.18.0 // indirect
+	golang.org/x/mobile v0.0.0-20240716161057-1ad2df20a8b6 // indirect
 	golang.org/x/net v0.17.0 // indirect
-	golang.org/x/sys v0.21.0 // indirect
-	golang.org/x/text v0.13.0 // indirect
+	golang.org/x/sys v0.23.0 // indirect
+	golang.org/x/text v0.16.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	honnef.co/go/js/dom v0.0.0-20210725211120-f030747120f2 // indirect
 	xabbo.b7c.io/goearth v0.2.6

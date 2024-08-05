@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/common"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/ui"
@@ -104,7 +105,7 @@ func main() {
 	)
 
 	go func() {
-		for range time.Tick(time.Millisecond * 600) {
+		for range time.Tick(time.Millisecond * 550) {
 			tickCounter()
 		}
 	}()
@@ -114,9 +115,12 @@ func main() {
 	})
 
 	ext.Initialized(func(args g.InitArgs) {
+		// Any initialization code can go here
 	})
 
 	ext.Activated(func() {
+		// Show the window when activated
+		fyneApp.SendNotification(fyne.NewNotification("G-itemViewer", "Extension activated"))
 		uiManager.ShowWindow()
 	})
 
@@ -128,6 +132,7 @@ func main() {
 		ext.RunE()
 	}()
 
+	// Run the UI setup, but don't show the window yet
 	uiManager.Run()
 }
 
@@ -140,6 +145,12 @@ type AssetManager struct {
 
 func NewAssetManager() *AssetManager {
 	return &AssetManager{}
+}
+
+func (am *AssetManager) WaitForAssets() {
+	for !am.AreAssetsLoaded() {
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (am *AssetManager) LoadAssets(host string) {

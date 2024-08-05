@@ -1361,7 +1361,8 @@ func (m *Manager) Run() {
 	m.window.Resize(fyne.NewSize(300, 600))
 	m.window.SetPadded(false)
 
-	m.window.ShowAndRun()
+	m.app.Run()
+
 }
 
 func (m *Manager) createHeader(imagePath string) fyne.CanvasObject {
@@ -3037,7 +3038,7 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 	soundToggle := widget.NewCheck("Enable Trade Sounds", func(enabled bool) {
 		m.soundEnabled = enabled
 	})
-	soundToggle.SetChecked(true) // Default to sound enabled
+	soundToggle.SetChecked(false) // Default to sound disabled
 
 	deletionRequestButton := widget.NewButton("Request Data Deletion", func() {
 		m.showDeletionRequestForm()

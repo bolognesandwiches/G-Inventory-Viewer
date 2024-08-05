@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -139,6 +141,7 @@ type Manager struct {
 	tradeMutex                 sync.Mutex
 	soundEnabled               bool
 	isUIVisible                bool
+	quitChan                   chan struct{}
 }
 
 func NewUnifiedInventory() *UnifiedInventory {
@@ -460,6 +463,7 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 		tradeCompleted:    false,
 		tradeMutex:        sync.Mutex{},
 		soundEnabled:      true, // Default to sound enabled
+		quitChan:          make(chan struct{}),
 	}
 
 	// Initialize speaker
@@ -1362,6 +1366,18 @@ func (m *Manager) Run() {
 	m.window.Resize(fyne.NewSize(300, 600))
 	m.window.SetPadded(false)
 
+	m.window.SetCloseIntercept(func() {
+		m.HideUI()
+	})
+
+	go func() {
+		<-m.quitChan
+		// Force quit after a short delay
+		time.Sleep(1 * time.Second)
+		os.Exit(0)
+	}()
+
+	// Instead of ShowAndRun, use Run() to start the app without showing the window
 	m.app.Run()
 
 }
@@ -1464,6 +1480,20 @@ func (m *Manager) createInventoryContent() *fyne.Container {
 	return popout
 }
 
+func (m *Manager) ToggleUI() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.window != nil {
+		if m.isUIVisible {
+			m.window.Hide()
+			m.isUIVisible = false
+		} else {
+			m.window.Show()
+			m.isUIVisible = true
+		}
+	}
+}
+
 func (m *Manager) ShowWindow() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1473,7 +1503,7 @@ func (m *Manager) ShowWindow() {
 	}
 }
 
-func (m *Manager) HideWindow() {
+func (m *Manager) HideUI() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.window != nil {
@@ -1482,17 +1512,19 @@ func (m *Manager) HideWindow() {
 	}
 }
 
-func (m *Manager) CloseWindow() {
+func (m *Manager) CloseExtension() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.window != nil {
 		m.window.Close()
-		m.isUIVisible = false
-		m.window = nil
 	}
-	if m.app != nil {
-		m.app.Quit()
-	}
+	// Attempt to quit the app normally
+	m.app.Quit()
+
+	m.isUIVisible = false
+
+	// Force kill the process
+	m.ForceKillProcess()
 }
 
 func (m *Manager) SetScanButtonActive(active bool) {
@@ -1502,6 +1534,29 @@ func (m *Manager) SetScanButtonActive(active bool) {
 		m.scanButton.SetActive(active)
 		m.scanButton.Refresh()
 	}
+}
+
+func (m *Manager) ForceKillProcess() {
+	go func() {
+		// Wait a short time to allow for any cleanup
+		time.Sleep(2 * time.Second)
+
+		// Get the process ID
+		pid := os.Getpid()
+
+		var cmd *exec.Cmd
+		if runtime.GOOS == "windows" {
+			cmd = exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))
+		} else {
+			cmd = exec.Command("kill", "-9", strconv.Itoa(pid))
+		}
+
+		err := cmd.Run()
+		if err != nil {
+			// If the external command fails, fall back to os.Exit
+			os.Exit(1)
+		}
+	}()
 }
 
 func (m *Manager) UpdateDiscordButtonState(active bool) {

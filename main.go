@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/common"
 	"github.com/bolognesandwiches/G-Inventory-Viewer/ui"
@@ -119,20 +118,20 @@ func main() {
 	})
 
 	ext.Activated(func() {
-		// Show the window when activated
-		fyneApp.SendNotification(fyne.NewNotification("G-itemViewer", "Extension activated"))
-		uiManager.ShowWindow()
+		// Toggle UI visibility when activated (play button clicked)
+		uiManager.ToggleUI()
 	})
 
 	ext.Disconnected(func() {
-		uiManager.CloseWindow()
+		// Close the extension when G-Earth socket disconnects
+		uiManager.CloseExtension()
 	})
 
 	go func() {
 		ext.RunE()
 	}()
 
-	// Run the UI setup, but don't show the window yet
+	// Run the UI in the main goroutine
 	uiManager.Run()
 }
 

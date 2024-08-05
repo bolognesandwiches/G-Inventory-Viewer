@@ -137,6 +137,7 @@ type Manager struct {
 	scanEnabled                bool
 	tradeCompleted             bool
 	tradeMutex                 sync.Mutex
+	soundEnabled               bool
 }
 
 func NewUnifiedInventory() *UnifiedInventory {
@@ -457,6 +458,7 @@ func NewManager(app fyne.App, ext *g.Ext, invManager *inventory.Manager, roomMan
 		scanEnabled:       false,
 		tradeCompleted:    false,
 		tradeMutex:        sync.Mutex{},
+		soundEnabled:      true, // Default to sound enabled
 	}
 
 	// Initialize speaker
@@ -3032,6 +3034,11 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 	})
 	scanToggle.SetChecked(false) // Default to opt-out
 
+	soundToggle := widget.NewCheck("Enable Trade Sounds", func(enabled bool) {
+		m.soundEnabled = enabled
+	})
+	soundToggle.SetChecked(true) // Default to sound enabled
+
 	deletionRequestButton := widget.NewButton("Request Data Deletion", func() {
 		m.showDeletionRequestForm()
 	})
@@ -3054,12 +3061,12 @@ func (m *Manager) setupInventoryContent() fyne.CanvasObject {
 		tcBadgeButton.Resize(fyne.NewSize(50, 50)) // Adjust size as needed
 	}
 
-	// Create a horizontal container for the toggle, TC badge, and deletion request button
+	// Modify the toggleAndButtonContainer to include the new sound toggle
 	toggleAndButtonContainer := container.NewHBox(
-		scanToggle,
-		layout.NewSpacer(), // This pushes the TC badge to the center
+		container.NewVBox(scanToggle, soundToggle), // Stack the toggles vertically
+		layout.NewSpacer(),
 		tcBadgeButton,
-		layout.NewSpacer(), // This pushes the deletion request button to the right
+		layout.NewSpacer(),
 		deletionRequestButton,
 	)
 
@@ -3552,7 +3559,9 @@ func (m *Manager) SendTradeLogToAPI(trade TradeLogEntry) error {
 }
 
 func (m *Manager) playSound(filename string) {
-	// Download the file
+	if !m.soundEnabled {
+		return // Don't play sound if it's disabled
+	}
 	resp, err := http.Get(AssetServerBaseURL + filename)
 	if err != nil {
 		log.Println("Error downloading sound file:", err)

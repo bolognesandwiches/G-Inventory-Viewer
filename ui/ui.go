@@ -138,6 +138,7 @@ type Manager struct {
 	tradeCompleted             bool
 	tradeMutex                 sync.Mutex
 	soundEnabled               bool
+	isUIVisible                bool
 }
 
 func NewUnifiedInventory() *UnifiedInventory {
@@ -1468,6 +1469,7 @@ func (m *Manager) ShowWindow() {
 	defer m.mu.Unlock()
 	if m.window != nil {
 		m.window.Show()
+		m.isUIVisible = true
 	}
 }
 
@@ -1476,6 +1478,7 @@ func (m *Manager) HideWindow() {
 	defer m.mu.Unlock()
 	if m.window != nil {
 		m.window.Hide()
+		m.isUIVisible = false
 	}
 }
 
@@ -1484,6 +1487,7 @@ func (m *Manager) CloseWindow() {
 	defer m.mu.Unlock()
 	if m.window != nil {
 		m.window.Close()
+		m.isUIVisible = false
 		m.window = nil
 	}
 	if m.app != nil {
@@ -3559,10 +3563,20 @@ func (m *Manager) SendTradeLogToAPI(trade TradeLogEntry) error {
 	return nil
 }
 
+func (m *Manager) IsUIVisible() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.isUIVisible
+}
+
 func (m *Manager) playSound(filename string) {
-	if !m.soundEnabled {
-		return // Don't play sound if it's disabled
+	m.mu.Lock()
+	if !m.soundEnabled || !m.isUIVisible {
+		m.mu.Unlock()
+		return
 	}
+	m.mu.Unlock()
+
 	resp, err := http.Get(AssetServerBaseURL + filename)
 	if err != nil {
 		log.Println("Error downloading sound file:", err)
